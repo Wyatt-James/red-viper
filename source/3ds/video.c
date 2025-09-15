@@ -222,9 +222,9 @@ void video_init(void) {
 	// The 3DS has two 3MB VRAM banks, so for this to work, 3 framebuffers must go into one bank.
 	// However, the allocator alternates between banks, so we need to allocate those first,
 	// before even the final render targets.
-	finalScreen[0] = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB8, -1);
+	finalScreen[0] = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB8, C3D_DEPTH_NONE);
 	C3D_RenderTargetSetOutput(finalScreen[0], GFX_TOP, GFX_LEFT, DISPLAY_TRANSFER_FLAGS);
-	finalScreen[1] = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB8, -1);
+	finalScreen[1] = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB8, C3D_DEPTH_NONE);
 	C3D_RenderTargetSetOutput(finalScreen[1], GFX_TOP, GFX_RIGHT, DISPLAY_TRANSFER_FLAGS);
 
 	// render one frame on the top screen and vsync to update vtotal

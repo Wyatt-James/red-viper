@@ -115,7 +115,7 @@ void video_hard_init(void) {
 	for (int i = 0; i < 2; i++) {
 		C3D_TexInitWithParams(&screenTexHard[i], NULL, params);
 		// Drawing backwards with a depth buffer isn't faster, so omit the depth buffer.
-		screenTargetHard[i] = C3D_RenderTargetCreateFromTex(&screenTexHard[i], GPU_TEXFACE_2D, 0, -1);
+		screenTargetHard[i] = C3D_RenderTargetCreateFromTex(&screenTexHard[i], GPU_TEXFACE_2D, 0, C3D_DEPTH_NONE);
 		C3D_RenderTargetClear(screenTargetHard[i], C3D_CLEAR_ALL, 0, 0);
 	}
 
@@ -124,7 +124,7 @@ void video_hard_init(void) {
 	params.format = GPU_RGBA4;
 	for (int i = 0; i < AFFINE_CACHE_SIZE; i++) {
 		C3D_TexInitWithParams(&tileMapCache[i].tex, NULL, params);
-		tileMapCache[i].target = C3D_RenderTargetCreateFromTex(&tileMapCache[i].tex, GPU_TEXFACE_2D, 0, -1);
+		tileMapCache[i].target = C3D_RenderTargetCreateFromTex(&tileMapCache[i].tex, GPU_TEXFACE_2D, 0, C3D_DEPTH_NONE);
 		C3D_RenderTargetClear(tileMapCache[i].target, C3D_CLEAR_ALL, 0xffffffff, 0);
 		tileMapCache[i].bg = -1;
 	}

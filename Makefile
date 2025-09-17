@@ -188,10 +188,10 @@ endif
 
 #---------------------------------------------------------------------------------
 all: release
-release:	export EXTRA_CFLAGS := -O3 -DDEBUGLEVEL=0
-testing:	export EXTRA_CFLAGS := -O3 -DDEBUGLEVEL=1
-debug:		export EXTRA_CFLAGS := -g -O0 -DDEBUGLEVEL=2
-slowdebug:	export EXTRA_CFLAGS := -g -O0 -DDEBUGLEVEL=3
+release:	export EXTRA_CFLAGS := -O3 -save-temps=obj -DDEBUGLEVEL=0
+testing:	export EXTRA_CFLAGS := -O3 -save-temps=obj -DDEBUGLEVEL=1
+debug:		export EXTRA_CFLAGS := -g -O0 -save-temps=obj -DDEBUGLEVEL=2
+slowdebug:	export EXTRA_CFLAGS := -g -O0 -save-temps=obj -DDEBUGLEVEL=3
 
 release testing debug slowdebug:
 	@mkdir -p $(BUILD) $(GFXBUILD)

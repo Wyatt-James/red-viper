@@ -405,11 +405,11 @@ void predictEvent(bool increment) {
     if (is_multiplayer) {
         int next_sync = vb_state->tHReg.lastsync + MULTIPLAYER_SYNC_CYCLES - cycles;
         if (next_event > next_sync) next_event = next_sync;
-        if (vb_state->tHReg.CCR & 0x04) {
-            // communication underway
-            int next_comm = vb_state->tHReg.nextcomm - cycles;
-            if (next_event > next_comm) next_event = next_comm;
-        }
+    }
+    if (vb_state->tHReg.CCR & 0x04) {
+        // communication underway
+        int next_comm = vb_state->tHReg.nextcomm - cycles;
+        if (next_event > next_comm) next_event = next_comm;
     }
 
     if (next_event < 0) next_event = 0;
@@ -464,23 +464,28 @@ int serviceInt(unsigned int cycles, WORD PC) {
             vb_state->v810_state.ret = true;
             pending_int = true;
         }
+    }
 
-        if (vb_state->tHReg.CCR & 0x04) {
-            // communication underway
-            if ((SWORD)(vb_state->tHReg.nextcomm - cycles) <= 0) {
-                // communication complete
-                vb_state->tHReg.CCR &= ~0x06;
-                if (!(vb_state->tHReg.CCR & 0x80)) vb_state->tHReg.cInt = true;
+    if (vb_state->tHReg.CCR & 0x04) {
+        // communication underway
+        if ((SWORD)(vb_state->tHReg.nextcomm - cycles) <= 0) {
+            // communication complete
+            vb_state->tHReg.cLock = false;
+            vb_state->tHReg.CCR &= ~0x06;
+            if (!(vb_state->tHReg.CCR & 0x80)) vb_state->tHReg.cInt = true;
+            if (is_multiplayer) {
                 vb_state->tHReg.CCSR = (vb_state->tHReg.CCSR & ~0x04) | (((vb_players[0].tHReg.CCSR & 0x0A) == 0x0A && (vb_players[1].tHReg.CCSR & 0x0A) == 0x0A) << 2);
-                if (!(vb_state->tHReg.CCSR & 0x80) && ((vb_state->tHReg.CCSR & 0x14) == 0x14 || (vb_state->tHReg.CCSR & 0x14) == 0)) {
-                    vb_state->tHReg.ccInt = true;
-                }
+            } else {
+                vb_state->tHReg.CCSR = vb_state->tHReg.CCSR | 0x04;
+            }
+            if (!(vb_state->tHReg.CCSR & 0x80) && ((vb_state->tHReg.CCSR & 0x14) == 0x14 || (vb_state->tHReg.CCSR & 0x14) == 0)) {
+                vb_state->tHReg.ccInt = true;
             }
         }
+    }
 
-        if (vb_state->tHReg.cInt || vb_state->tHReg.ccInt) {
-            pending_int = v810_int(3, PC) || pending_int;
-        }
+    if (vb_state->tHReg.cInt || vb_state->tHReg.ccInt) {
+        pending_int = v810_int(3, PC) || pending_int;
     }
 
     if (vb_state->tHReg.tInt) {
@@ -717,7 +722,9 @@ int v810_run(void) {
                                 vb_players[i].tHReg.nextcomm = vb_players[!i].tHReg.nextcomm;
                                 vb_players[i].tHReg.CDRR = vb_players[!i].tHReg.CDTR;
                                 vb_players[!i].tHReg.CDRR = vb_players[i].tHReg.CDTR;
-                            } else {
+                                vb_players[i].tHReg.cLock = true;
+                                vb_players[!i].tHReg.cLock = true;
+                            } else if (!vb_players[i].tHReg.cLock) {
                                 // waiting on nothing, so delay until after the next sync
                                 vb_players[i].tHReg.nextcomm = vb_players[i].v810_state.cycles + 8000;
                             }

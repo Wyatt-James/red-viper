@@ -2612,6 +2612,10 @@ void guiInit(void) {
     any_2ds = old_2ds || model == CFG_MODEL_N2DSXL;
 
     C2D_Init(C2D_DEFAULT_MAX_OBJECTS);
+    
+#ifndef C3D_DEPTH_NONE
+#define C3D_DEPTH_NONE -1
+#endif
 
     screen = C3D_RenderTargetCreate(GSP_SCREEN_WIDTH, GSP_SCREEN_HEIGHT_BOTTOM, GPU_RB_RGB8, C3D_DEPTH_NONE);
     C3D_RenderTargetSetOutput(screen, GFX_BOTTOM, GFX_LEFT,

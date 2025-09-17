@@ -217,6 +217,10 @@ void video_init(void) {
 
     video_hard_init();
 	video_soft_init();
+	
+#ifndef C3D_DEPTH_NONE
+#define C3D_DEPTH_NONE -1
+#endif
 
 	// The hardware renderer creates 1 * 0.75MB + 8 * 0.5MB framebuffers.
 	// The 3DS has two 3MB VRAM banks, so for this to work, 3 framebuffers must go into one bank.

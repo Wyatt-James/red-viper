@@ -107,6 +107,10 @@ void video_hard_init(void) {
 	params.onVram = false;
 	params.maxLevel = 0;
 	C3D_TexInitWithParams(&tileTexture, NULL, params);
+	
+#ifndef C3D_DEPTH_NONE
+#define C3D_DEPTH_NONE -1
+#endif
 
 	params.width = 512;
 	params.height = 512;

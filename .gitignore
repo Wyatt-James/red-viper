@@ -8,3 +8,11 @@ build
 *.lst
 *.vb
 *.zip
+
+# scripts and script support
+build_flags.txt
+build_scripts
+
+# logging
+build_logs
+gdb.txt

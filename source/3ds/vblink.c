@@ -1,7 +1,6 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <malloc.h>
 #include <sys/stat.h>
 #include <string.h>
 #include <zlib.h>
@@ -23,7 +22,7 @@ static Thread thread;
 static void vblink_thread(void*);
 
 void vblink_init(void) {
-    socInit(memalign(0x1000, 0x40000), 0x40000);
+    socInit(aligned_alloc(0x1000, 0x40000), 0x40000);
     svcCreateEvent(&vblink_event, RESET_STICKY);
 }
 
@@ -50,7 +49,7 @@ int vblink_open(void) {
     int flags = fcntl(listenfd, F_GETFL);
     if (flags == -1) return errno;
     if (fcntl(listenfd, F_SETFL, flags | O_NONBLOCK) == -1) return errno;
-    
+
     datafd = -1;
 
     svcClearEvent(vblink_event);
@@ -246,10 +245,14 @@ static void vblink_thread(void*) {
 
         V810_ROM1.size = size;
         V810_ROM1.highaddr = 0x7000000 + size - 1;
+        // fill the rest of the address space with copies of the rom
+        for (int i = V810_ROM1.size; i < MAX_ROM_SIZE; i += V810_ROM1.size) {
+            memcpy(V810_ROM1.pmemory + i, V810_ROM1.pmemory, V810_ROM1.size);
+        }
         is_sram = false;
         gen_table();
         tVBOpt.CRC32 = get_crc(size);
-        memcpy(tVBOpt.GAME_ID, (char*)(V810_ROM1.off + (V810_ROM1.highaddr & 0xFFFFFDF9)), 6);
+        tVBOpt.GAME_ID = MAKE_GAMEID((char*)(V810_ROM1.off + (V810_ROM1.highaddr & 0xFFFFFDF9)));
         apply_patches();
         v810_reset();
 

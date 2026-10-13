@@ -2,6 +2,7 @@
 #define VB_SET_H_
 
 #include <stdbool.h>
+#include "vb_types.h"
 
 #define D_VGA       0
 #define D_VESA1     1
@@ -21,6 +22,8 @@
 
 #define CONFIG_FILENAME "sdmc:/config/red-viper/rv_config.ini"
 #define CONFIG_FILENAME_LEGACY "rv_config.ini"
+
+#define INPUT_BUFFER_MAX 10
 
 // vbkey positions
 enum VB_KCFG {
@@ -43,6 +46,7 @@ enum VB_KCFG {
 typedef enum {
     RM_GPUONLY, // VIP only.
     RM_TOGPU, // Mix CPU and hardware VIP graphics on GPU.
+    RM_TOCPU, // Copy GPU VIP to CPU.
     RM_CPUONLY, // Software VIP.
 } RENDERMODE_t;
 
@@ -71,6 +75,7 @@ typedef struct VB_OPT {
     int   FASTFORWARD;
     int   FF_TOGGLE; // 0 - hold, 1 - toggle
     RENDERMODE_t RENDERMODE;
+    bool  SOFT_FLUSH;
     int   SLIDERMODE; // 0 - 3ds (positive parallax), 1 - virtual boy (full parallax)
     int   DEFAULT_EYE; // 0 - left, 1 - right
     int   PAUSE_RIGHT; // right side of pause block on touch screen
@@ -117,7 +122,7 @@ typedef struct VB_OPT {
     char *PROG_NAME; // Path\Name of program
     char HOME_PATH[240];
     unsigned long CRC32; // CRC32 of ROM
-    char  GAME_ID[6];
+    int   GAME_ID;
     bool  PERF_INFO;
     bool  VSYNC;
     bool  N3DS_SPEEDUP;
@@ -133,7 +138,11 @@ typedef struct VB_OPT {
     bool  VIP_OVER_SOFT;
     bool  FORWARDER;
     bool  DOUBLE_BUFFER;
+    BYTE  INPUT_BUFFER; // for multiplayer
 } VB_OPT;
+
+#define MAKE_GAMEID(s) ((s)[0] ^ ((s)[1] << 5) ^ ((s)[2] << 10) ^ ((s)[3] << 15) ^ ((s)[4] << 20) ^ ((s)[5] << 25))
+#define CHECK_GAMEID(s) (tVBOpt.GAME_ID == MAKE_GAMEID(s))
 
 void setCustomMappingDefaults(void);
 void setDefaults(void);

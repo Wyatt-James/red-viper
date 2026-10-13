@@ -26,7 +26,7 @@ shaderProgram_s sAffine, sChar, sFinal;
 static YATT_ShaderBinary shader_binary = { n3ds_shader_shbin, &n3ds_shader_shbin_size, NULL };
 
 static YATT_ShaderProgram shader_programs[] = {
-    { &shader_binary, &sAffine, DVLE_AFFINE_G, DVLE_AFFINE_V, .gsh_stride = 3 },
+    { &shader_binary, &sAffine, DVLE_AFFINE_G, DVLE_AFFINE_V, .gsh_stride = 2 },
     { &shader_binary, &sChar,   DVLE_CHAR_G,   DVLE_CHAR_V,   .gsh_stride = 0 },
     { &shader_binary, &sFinal,  DVLE_FINAL_G,  DVLE_FINAL_V,  .gsh_stride = 3 },
 };
@@ -49,13 +49,13 @@ void n3ds_shaders_init(void)
         return;
 
     initialized = true;
-    
+
     if (yatt_init_shader_binaries(&shader_binary, 1) != YATT_OK)
         svcBreak(USERBREAK_PANIC);
 
     if (yatt_init_shader_programs(shader_programs, ARRAY_COUNT(shader_programs)) != YATT_OK)
         svcBreak(USERBREAK_PANIC);
-    
+
     if (yatt_parse_shader_uniforms(uniforms, shader_programs, ARRAY_COUNT(uniforms), ARRAY_COUNT(shader_programs)) != YATT_OK)
         svcBreak(USERBREAK_PANIC);
 }

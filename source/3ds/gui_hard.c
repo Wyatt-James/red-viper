@@ -25,6 +25,10 @@
 #include "vblink.h"
 #include "cpp.h"
 #include "extrapad.h"
+#include "multiplayer.h"
+#include "rom_db.h"
+#include "patches.h"
+#include "video_hard.h"
 
 #define COLOR_R(COLOR) ( ((COLOR) & 0x000000FF) )
 #define COLOR_G(COLOR) ( ((COLOR) & 0x0000FF00) >> 8)
@@ -90,6 +94,8 @@ void drawTouchControls(int inputs);
 bool old_2ds = false;
 bool any_2ds = false;
 
+extern C3D_RenderTarget *finalScreen[2];
+
 static C3D_RenderTarget *screen;
 
 static C2D_TextBuf static_textbuf;
@@ -103,7 +109,12 @@ static C2D_Text text_A, text_B, text_btn_A, text_btn_B, text_btn_X, text_btn_L, 
                 text_vb_lpad, text_vb_rpad, text_mirror_abxy, text_vblink, text_preset, text_custom,
                 text_error, text_3ds, text_vb, text_map, text_currently_mapped_to, text_normal, text_turbo,
                 text_current_default, text_anaglyph, text_depth, text_cpp_on, text_cpp_off,
-                text_monochrome, text_multicolor, text_brighten, text_brightness_disclaimer;
+                text_monochrome, text_multicolor, text_brighten, text_brightness_disclaimer,
+                text_multi_waiting, text_multi_init_error, text_multi_disconnect, text_multi_comm_error,
+                text_multi_reset_on_join, text_input_buffer, text_areyousure_leave,
+                text_version_mismatch, text_your_version, text_connect_anyway,
+                text_multi_no_match, text_multi_not_loaded, text_dlplay_saving, text_multi_preparing,
+                text_downloading, text_forwarder_nomatch, text_protocol_mismatch;
 
 #define CUSTOM_3DS_BUTTON_TEXT(BUTTON) static C2D_Text text_custom_3ds_button_##BUTTON;
 PERFORM_FOR_EACH_3DS_BUTTON(CUSTOM_3DS_BUTTON_TEXT)
@@ -176,7 +187,7 @@ static inline int handle_buttons(Button buttons[], int count);
 #define DEFAULT_RETURN
 
 #define LOOP_END(buttons) \
-        button = HANDLE_BUTTONS((buttons)); \
+        if (loop) button = HANDLE_BUTTONS((buttons)); \
         if (button >= 0) loop = false; \
         C2D_Flush(); \
         C3D_FrameEnd(0); \
@@ -187,10 +198,14 @@ static inline int handle_buttons(Button buttons[], int count);
         return DEFAULT_RETURN; \
     }
 
+static Button no_buttons[] = {{.hidden = true}};
+
+static void main_menu(int initial_button);
+
 static void first_menu(int initial_button);
 static Button first_menu_buttons[] = {
     {.str="Load ROM", .x=16, .y=16, .w=288, .h=144},
-    {.str="About", .x=0, .y=176, .w=80, .h=64},
+    {.str="Multi\nplayer", .x=0, .y=176, .w=80, .h=64},
     {.str="Options", .x=240, .y=176, .w=80, .h=64},
     {.str="Quit", .x=112, .y=192, .w=96, .h=48},
 };
@@ -199,8 +214,8 @@ static void game_menu(int initial_button);
 static Button game_menu_buttons[] = {
     #define MAIN_MENU_LOAD_ROM 0
     {.str="Load ROM", .x=232 - 16, .y=64, .w=80 + 16, .h=80},
-    #define MAIN_MENU_ABOUT 1
-    {.str="About", .x=0, .y=176, .w=80, .h=64},
+    #define MAIN_MENU_MULTI 1
+    {.str="Multi\nplayer", .x=0, .y=176, .w=80, .h=64},
     #define MAIN_MENU_OPTIONS 2
     {.str="Options", .x=240, .y=176, .w=80, .h=64},
     #define MAIN_MENU_QUIT 3
@@ -213,12 +228,96 @@ static Button game_menu_buttons[] = {
     {.str="Savestates", .x=112, .y=64, .w=80 + 16, .h=80},
 };
 
-static void rom_loader(void);
+static void multiplayer_menu(int initial_button);
+static Button multiplayer_menu_buttons[] = {
+    #define MULTI_MENU_RESUME 0
+    {.str="Resume", .x=0, .y=0, .w=320, .h=48},
+    #define MULTI_MENU_BUFFER_MINUS 1
+    {.str="-", .x=180, .y=100, .w=32, .h=32},
+    #define MULTI_MENU_BUFFER_PLUS 2
+    {.str="+", .x=180+64, .y=100, .w=32, .h=32},
+    #define MULTI_MENU_RESET 3
+    {.str="Reset", .x=0, .y=176, .w=80, .h=64},
+    #define MULTI_MENU_LEAVE 4
+    {.str="Leave", .x=112, .y=192, .w=96, .h=48},
+    #define MULTI_MENU_OPTIONS 5
+    {.str="Options", .x=240, .y=176, .w=80, .h=64},
+};
+
+static void multiplayer_wait_for_peer(void);
+
+static bool rom_loader(char *message);
 static Button rom_loader_buttons[] = {
     #define ROM_LOADER_UP 0
     {.str="Up", .x=0, .y=0, .w=32, .h=32},
     #define ROM_LOADER_BACK 1
     {.str="Back", .x=0, .y=208, .w=48, .h=32},
+};
+
+static void multiplayer_main(int initial_button, bool init_uds);
+static Button multiplayer_main_buttons[] = {
+    #define MULTI_MAIN_HOST 0
+    {.str="Host", .x=16, .y=16, .w=288, .h=48},
+    #define MULTI_MAIN_JOIN 1
+    {.str="Join", .x=16, .y=80, .w=288, .h=48},
+    #define MULTI_MAIN_BACK 2
+    {.str="Back", .x=0, .y=208, .w=48, .h=32},
+};
+
+static void multiplayer_join(void);
+static Button multiplayer_join_buttons[] = {
+    {.str="", .x=320/2-224/2, .y=4+50*0, .w=224, .h=48},
+    {.str="", .x=320/2-224/2, .y=4+50*1, .w=224, .h=48},
+    {.str="", .x=320/2-224/2, .y=4+50*2, .w=224, .h=48},
+    {.str="", .x=320/2-224/2, .y=4+50*3, .w=224, .h=48},
+    #define MULTI_JOIN_COUNT 4
+    #define MULTI_JOIN_REFRESH 4
+    {.str="Refresh", .x=320-68, .y=208, .w=68, .h=32},
+    #define MULTI_JOIN_BACK 5
+    {.str="Back", .x=0, .y=208, .w=48, .h=32},
+};
+
+static void multiplayer_host(void);
+static Button multiplayer_host_buttons[] = {
+    #define MULTI_HOST_LEAVE 0
+    {.str = "Cancel", .x=0, .y=208, .w=64, .h=32},
+    #define MULTI_HOST_CHANGE 1
+    {.str = "Change ROM", .x=160-64, .y=180, .w=64*2, .h=48},
+};
+
+static void multiplayer_prepare_join(int initial_button);
+static Button multiplayer_prepare_join_buttons[] = {
+    #define MULTI_PREPARE_SD 0
+    {.str="Load from\nSD Card", .x=32, .y=140, .w=112, .h=52},
+    #define MULTI_PREPARE_DLPLAY 1
+    {.str="Download\nPlay", .x=176, .y=140, .w=112, .h=52},
+    #define MULTI_PREPARE_LEAVE 2
+    {.str="Leave", .x=0, .y=208, .w=56, .h=32},
+};
+
+static void multiplayer_dlplay(void);
+static Button multiplayer_dlplay_buttons[] = {
+    #define MULTI_ROOM_LEAVE 0
+    {.str = "Cancel", .x=160-48, .y=180, .w=48*2, .h=48},
+};
+
+static void multiplayer_sram_transfer(void);
+
+static void multiplayer_ready_room(bool is_host, int initial_button);
+static Button multiplayer_ready_room_buttons[] = {
+    #define MULTI_READY_START 0
+    {.str = "Start", .x=160-48, .y=180, .w=48*2, .h=48},
+    #define MULTI_READY_BUFFER_MINUS 1
+    {.str="-", .x=180, .y=140, .w=32, .h=32},
+    #define MULTI_READY_BUFFER_PLUS 2
+    {.str="+", .x=180+64, .y=140, .w=32, .h=32},
+    #define MULTI_READY_LEAVE 3
+    {.str="Leave", .x=0, .y=208, .w=56, .h=32},
+};
+
+static void multiplayer_error(int err, C2D_Text *messsage, bool exit_to_menu);
+static Button multiplayer_error_buttons[] = {
+    {.str = "Exit", .x=160-48, .y=180, .w=48*2, .h=48},
 };
 
 static void controls(int initial_button);
@@ -368,26 +467,28 @@ static Button touchscreen_settings_buttons[] = {
 static void options(int initial_button);
 static Button options_buttons[] = {
     #define OPTIONS_VIDEO 0
-    {.str="Video settings", .x=16, .y=16, .w=128, .h=48},
+    {.str="Video\nsettings", .x=16, .y=16, .w=96-8, .h=48},
     #define OPTIONS_CONTROLS 1
-    {.str="Controls", .x=176, .y=16, .w=128, .h=48},
+    {.str="Controls", .x=112-2, .y=16, .w=96+4, .h=48},
     #define OPTIONS_SOUND 2
-    {.str="Sound", .x=16, .y=80, .w=96-8, .h=48, .show_toggle=true, .toggle_text_on=&text_on, .toggle_text_off=&text_off},
-    #define OPTIONS_FF 3
+    {.str="Sound", .x=208+8, .y=16, .w=96-8, .h=48, .show_toggle=true, .toggle_text_on=&text_on, .toggle_text_off=&text_off},
+    #define OPTIONS_PERF 3
+    {.str="Perf.\nsettings", .x=16, .y=80, .w=96-8, .h=48},
+    #define OPTIONS_FF 4
     {.str="Fastforward", .x=112-2, .y=80, .w=96+4, .h=48, .show_toggle=true, .toggle_text_on=&text_toggle, .toggle_text_off=&text_hold},
-    #define OPTIONS_PERF 4
-    {.str="Perf.\nsettings", .x=208+8, .y=80, .w=96-8, .h=48},
-    #define OPTIONS_SAVE_GLOBAL 5
+    #define OPTIONS_ABOUT 5
+    {.str="About", .x=208+8, .y=80, .w=96-8, .h=48},
+    #define OPTIONS_SAVE_GLOBAL 6
     {.str="Save\n(Global)", .x=16, .y=144, .w=96-8, .h=48},
-    #define OPTIONS_SAVE_GAME 6
+    #define OPTIONS_SAVE_GAME 7
     {.str="Save\n(Game)", .x=112-2, .y=144, .w=96+4, .h=48},
-    #define OPTIONS_DISCARD 7
+    #define OPTIONS_DISCARD 8
     {.str="Discard", .x=208+8, .y=144, .w=96-8, .h=48},
-    #define OPTIONS_RESET_TO_GLOBAL 8
+    #define OPTIONS_RESET_TO_GLOBAL 9
     {.str="Restore\nGlobal", .y=144, .h=48},
-    #define OPTIONS_BACK  9
+    #define OPTIONS_BACK  10
     {.str="Back", .x=0, .y=208, .w=48, .h=32},
-    #define OPTIONS_DEBUG 10
+    #define OPTIONS_DEBUG 11
     {.str="Save debug info", .x=170, .y=208, .w=150, .h=32},
 };
 
@@ -435,7 +536,7 @@ static Button anaglyph_settings_buttons[] = {
     {.x=50, .y=16+24*6, .w=80, .h=20, .colour=0xFFFF00},
     #define ANAGLYPH_LEFT_WHITE 7
     {.x=50, .y=16+24*7, .w=80, .h=20, .colour=0xFFFFFF},
-    
+
     #define ANAGLYPH_RIGHT_OFF 8
     {.x=176, .y=16+24*0, .w=80, .h=20, .colour=0x404040},
     #define ANAGLYPH_RIGHT_RED 9
@@ -564,7 +665,7 @@ static Button about_buttons[] = {
     {.str="Back", .x=160-48, .y=180, .w=48*2, .h=48},
 };
 
-static void load_rom(void);
+static bool load_rom(char *rom_message);
 static Button load_rom_buttons[] = {
     {.str="Unload & cancel", .x=160-80, .y=180, .w=80*2, .h=48},
 };
@@ -575,9 +676,16 @@ static Button forwarder_error_buttons[] = {
 };
 
 #define SETUP_ALL_BUTTONS \
-    SETUP_BUTTONS(first_menu_buttons); \
     SETUP_BUTTONS(game_menu_buttons); \
+    SETUP_BUTTONS(multiplayer_menu_buttons); \
     SETUP_BUTTONS(rom_loader_buttons); \
+    SETUP_BUTTONS(multiplayer_main_buttons); \
+    SETUP_BUTTONS(multiplayer_host_buttons); \
+    SETUP_BUTTONS(multiplayer_join_buttons); \
+    SETUP_BUTTONS(multiplayer_prepare_join_buttons); \
+    SETUP_BUTTONS(multiplayer_dlplay_buttons); \
+    SETUP_BUTTONS(multiplayer_ready_room_buttons); \
+    SETUP_BUTTONS(multiplayer_error_buttons); \
     SETUP_BUTTONS(controls_buttons); \
     SETUP_BUTTONS(cpp_options_buttons); \
     SETUP_BUTTONS(preset_controls_buttons); \
@@ -598,7 +706,8 @@ static Button forwarder_error_buttons[] = {
     SETUP_BUTTONS(load_rom_buttons); \
     SETUP_BUTTONS(areyousure_buttons); \
     SETUP_BUTTONS(savestate_buttons); \
-    SETUP_BUTTONS(savestate_confirm_buttons);
+    SETUP_BUTTONS(savestate_confirm_buttons); \
+    SETUP_BUTTONS(first_menu_buttons);
 
 static int last_savestate = 0;
 
@@ -608,11 +717,12 @@ static void draw_logo(void) {
     vb_state->tVIPREG.BRTC = 145 - vb_state->tVIPREG.BRTA - vb_state->tVIPREG.BRTB;
 	memset((u8*)vb_state->V810_DISPLAY_RAM.off + 0x3dc00, 0, 0x400);
     tDSPCACHE.ColumnTableInvalid = true;
-    
+
     for (int i = 0; i < 2; i++) {
         C2D_SceneBegin(screenTargetHard[i]);
-        C2D_ViewScale(1, -1);
-        C2D_ViewTranslate(0, -512);
+        C2D_ViewScale(-1, -1);
+        C2D_ViewRotateDegrees(90);
+        C2D_ViewTranslate(-512, 0);
         C2D_DrawSprite(&splash_left);
         C2D_DrawSprite(&splash_right);
     }
@@ -653,7 +763,8 @@ static void first_menu(int initial_button) {
 
         // at this point we know we're a forwarder, so just load the rom
         tVBOpt.FORWARDER = true;
-        return load_rom();
+        load_rom(NULL);
+        return;
     }
 
     no_forwarder:
@@ -661,20 +772,22 @@ static void first_menu(int initial_button) {
         draw_logo();
         if (hidKeysDown() & KEY_Y) loop = false;
     LOOP_END(first_menu_buttons);
-    if (hidKeysDown() & KEY_Y) return vblink();
+    if (hidKeysDown() & KEY_Y) [[gnu::musttail]] return vblink();
     guiop = 0;
     switch (button) {
         case MAIN_MENU_LOAD_ROM:
-            return rom_loader();
-        case MAIN_MENU_ABOUT:
-            return about();
+            if (rom_loader(NULL)) return;
+            else [[gnu::musttail]] return main_menu(MAIN_MENU_LOAD_ROM);
+        case MAIN_MENU_MULTI:
+            [[gnu::musttail]] return multiplayer_main(0, true);
         case MAIN_MENU_OPTIONS:
-            return options(0);
-        case MAIN_MENU_QUIT: // Quit
+            options(0);
+            [[gnu::musttail]] return first_menu(MAIN_MENU_OPTIONS);
+        case MAIN_MENU_QUIT:
             if (areyousure(&text_areyousure_exit)) {
             guiop = GUIEXIT;
             return;
-            } else return first_menu(MAIN_MENU_QUIT);
+            } else [[gnu::musttail]] return first_menu(MAIN_MENU_QUIT);
     }
 }
 
@@ -689,50 +802,200 @@ static void game_menu(int initial_button) {
     LOOP_BEGIN(game_menu_buttons, initial_button);
         if (!tVBOpt.FORWARDER && (hidKeysDown() & KEY_Y)) loop = false;
     LOOP_END(game_menu_buttons);
-    if (!tVBOpt.FORWARDER && (hidKeysDown() & KEY_Y)) return vblink();
+    if (!tVBOpt.FORWARDER && (hidKeysDown() & KEY_Y)) [[gnu::musttail]] return vblink();
     switch (button) {
-        case MAIN_MENU_LOAD_ROM: // Load ROM
+        case MAIN_MENU_LOAD_ROM:
             guiop = AKILL | VBRESET;
-            return rom_loader();
-        case MAIN_MENU_ABOUT: // Controls
-            return about();
-        case MAIN_MENU_OPTIONS: // Options
-            return options(0);
-        case MAIN_MENU_QUIT: // Quit
+            if (rom_loader(NULL)) return;
+            else [[gnu::musttail]] return main_menu(MAIN_MENU_LOAD_ROM);
+        case MAIN_MENU_MULTI:
+            [[gnu::musttail]] return multiplayer_main(0, true);
+        case MAIN_MENU_OPTIONS:
+            options(0);
+            [[gnu::musttail]] return game_menu(MAIN_MENU_OPTIONS);
+        case MAIN_MENU_QUIT:
             if (areyousure(&text_areyousure_exit)) {
                 guiop = AKILL | GUIEXIT;
                 return;
-            } else return game_menu(MAIN_MENU_QUIT);
-        case MAIN_MENU_RESUME: // Resume
-            guiop = 0;
-            return;
-        case MAIN_MENU_RESET: // Reset
+            } else [[gnu::musttail]] return game_menu(MAIN_MENU_QUIT);
+        case MAIN_MENU_RESUME:
+            // curly braces to avoid compiler error
+            {
+                guiop = 0;
+                return;
+            }
+        case MAIN_MENU_RESET:
             if (areyousure(&text_areyousure_reset)) {
                 // clear screen buffer
                 for (int i = 0; i < 2; i++) {
                     C2D_TargetClear(screenTargetHard[i], 0);
+                    C2D_TargetClear(finalScreen[i], 0);
                 }
                 C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
                 video_flush(true);
                 C3D_FrameEnd(0);
                 guiop = AKILL | VBRESET;
                 return;
-            } else return game_menu(MAIN_MENU_RESET);
+            } else [[gnu::musttail]] return game_menu(MAIN_MENU_RESET);
         case MAIN_MENU_SAVESTATES:
-            return savestate_menu(0, last_savestate);
+            [[gnu::musttail]] return savestate_menu(0, last_savestate);
     }
 }
 
 static void main_menu(int initial_button) {
-    if (game_running) game_menu(initial_button);
-    else first_menu(initial_button);
+    if (is_multiplayer) {
+        [[gnu::musttail]] return multiplayer_menu(0);
+    } else {
+        my_player_id = 0;
+        if (game_running) [[gnu::musttail]] return game_menu(initial_button);
+        else [[gnu::musttail]] return first_menu(initial_button);
+    }
+}
+
+static void multiplayer_menu(int initial_button) {
+    C2D_TextBufClear(dynamic_textbuf);
+    C2D_Text buffer_text;
+    char buffer_str[3] = {0};
+    snprintf(buffer_str, sizeof(buffer_str), "%d", tVBOpt.INPUT_BUFFER);
+    C2D_TextParse(&buffer_text, dynamic_textbuf, buffer_str);
+    C2D_TextOptimize(&buffer_text);
+
+    LOOP_BEGIN(multiplayer_menu_buttons, initial_button);
+        if (udsWaitConnectionStatusEvent(false, false)) {
+            udsConnectionStatus status;
+            udsGetConnectionStatus(&status);
+            if (status.total_nodes < 2 || status.status == 11) {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+            }
+        }
+        C2D_DrawText(&text_input_buffer, C2D_AlignRight | C2D_WithColor, 180 - 8, 104, 0, 0.7, 0.7, TINT_COLOR);
+        C2D_DrawText(&buffer_text, C2D_AlignCenter | C2D_WithColor, 180 + 48, 104, 0, 0.7, 0.7, TINT_COLOR);
+    LOOP_END(multiplayer_menu_buttons);
+    switch (button) {
+        case MULTI_MENU_RESUME:
+            while (wait_for_free_send_slot(1000000000)) {
+                if (udsWaitConnectionStatusEvent(false, false)) {
+                    udsConnectionStatus status;
+                    udsGetConnectionStatus(&status);
+                    if (status.total_nodes < 2 || status.status == 11) {
+                        C3D_FrameEnd(0);
+                        local_disconnect();
+                        udsExit();
+                        [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+                    }
+                }
+            }
+            Packet *send_packet = new_packet_to_send();
+            send_packet->packet_type = PACKET_RESUME;
+            send_packet->resume.input_buffer = tVBOpt.INPUT_BUFFER;
+            ship_packet(send_packet);
+            return;
+        case MULTI_MENU_RESET:
+            if (areyousure(&text_areyousure_reset)) {
+                // clear screen buffer
+                for (int i = 0; i < 2; i++) {
+                    C2D_TargetClear(screenTargetHard[i], 0);
+                    C2D_TargetClear(finalScreen[i], 0);
+                }
+                C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+                video_flush(true);
+                C3D_FrameEnd(0);
+                guiop = AKILL | VBRESET;
+
+                while (wait_for_free_send_slot(1000000000)) {
+                    if (udsWaitConnectionStatusEvent(false, false)) {
+                        udsConnectionStatus status;
+                        udsGetConnectionStatus(&status);
+                        if (status.total_nodes < 2 || status.status == 11) {
+                            C3D_FrameEnd(0);
+                            local_disconnect();
+                            udsExit();
+                            [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+                        }
+                    }
+                }
+                Packet *send_packet = new_packet_to_send();
+                send_packet->packet_type = PACKET_RESET;
+                send_packet->resume.input_buffer = tVBOpt.INPUT_BUFFER;
+                ship_packet(send_packet);
+                return;
+            } else {
+                [[gnu::musttail]] return multiplayer_menu(MULTI_MENU_RESET);
+            }
+        case MULTI_MENU_BUFFER_MINUS:
+            if (tVBOpt.INPUT_BUFFER > 1) tVBOpt.INPUT_BUFFER--;
+            [[gnu::musttail]] return multiplayer_menu(MULTI_MENU_BUFFER_MINUS);
+        case MULTI_MENU_BUFFER_PLUS:
+            if (tVBOpt.INPUT_BUFFER < INPUT_BUFFER_MAX) tVBOpt.INPUT_BUFFER++;
+            [[gnu::musttail]] return multiplayer_menu(MULTI_MENU_BUFFER_PLUS);
+        case MULTI_MENU_LEAVE:
+            if (areyousure(&text_areyousure_leave)) {
+                is_multiplayer = false;
+                local_disconnect();
+                udsExit();
+                v810_endmultiplayer();
+                [[gnu::musttail]] return main_menu(MAIN_MENU_LOAD_ROM);
+            } else {
+                [[gnu::musttail]] return multiplayer_menu(MULTI_MENU_LEAVE);
+            }
+        case MULTI_MENU_OPTIONS:
+            options(0);
+            [[gnu::musttail]] return multiplayer_menu(MULTI_MENU_OPTIONS);
+    }
+}
+
+static void multiplayer_wait_for_peer(void) {
+    char player_name[11] = {0};
+    udsNodeInfo peer_info;
+    udsGetNodeInformation(!my_player_id + 1, &peer_info);
+    udsGetNodeInfoUsername(&peer_info, player_name);
+    char message[32];
+    snprintf(message, sizeof(message), "%s paused the game.", player_name);
+    C2D_Text text;
+    C2D_TextBufClear(dynamic_textbuf);
+    C2D_TextParse(&text, dynamic_textbuf, message);
+    C2D_TextOptimize(&text);
+    LOOP_BEGIN(no_buttons, -1);
+        if (udsWaitConnectionStatusEvent(false, false)) {
+            udsConnectionStatus status;
+            udsGetConnectionStatus(&status);
+            if (status.total_nodes < 2 || status.status == 11) {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+            }
+        }
+        Packet *recv_packet;
+        if ((recv_packet = read_next_packet())) {
+            if (recv_packet->packet_type == PACKET_RESUME || recv_packet->packet_type == PACKET_RESET) {
+                if (recv_packet->packet_type == PACKET_RESET) {
+                    // clear screen buffer
+                    for (int i = 0; i < 2; i++) {
+                        C2D_TargetClear(screenTargetHard[i], 0);
+                        C2D_TargetClear(finalScreen[i], 0);
+                    }
+                    video_flush(true);
+                    guiop = AKILL | VBRESET;
+                }
+                if (recv_packet->resume.input_buffer <= INPUT_BUFFER_MAX) {
+                    tVBOpt.INPUT_BUFFER = recv_packet->resume.input_buffer;
+                }
+                loop = false;
+            }
+        }
+        C2D_DrawText(&text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.7, 0.7, TINT_COLOR);
+    LOOP_END(no_buttons);
 }
 
 int strptrcmp(const void *s1, const void *s2) {
     return strcasecmp(*(const char**)s1, *(const char**)s2);
 }
 
-static void rom_loader(void) {
+static bool rom_loader(char *message) {
     static char path[300] = {0};
     static char old_dir[300] = {0};
     if (!path[0]) {
@@ -761,7 +1024,7 @@ static void rom_loader(void) {
     if (!dirHandle) {
         // TODO error
         guiop = 0;
-        return;
+        return false;
     }
 
     char **dirs = malloc(8 * sizeof(char*));
@@ -846,6 +1109,9 @@ static void rom_loader(void) {
     int das_start = 20;
     int xdas_length = 0, xdas_time = 0, xdas_count = 0;
     int ydas_length = 0, ydas_time = 0, ydas_count = 0;
+
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN false
 
     LOOP_BEGIN(rom_loader_buttons, -1);
         // process rom list
@@ -977,7 +1243,7 @@ static void rom_loader(void) {
                 // limit otherwise
                 if (cursor < 0) cursor = 0;
                 if (cursor >= entry_count) cursor = entry_count-1;
-                
+
                 int temp = (cursor-1) * entry_height;
                 if (scroll_pos > temp) scroll_pos = temp;
 
@@ -993,15 +1259,15 @@ static void rom_loader(void) {
         // draw
         C2D_TextBufClear(dynamic_textbuf);
         float y = -scroll_pos;
-        C2D_Text text;
+        C2D_Text path_text;
         // entries
         for (int i = 0; i < entry_count; i++) {
             if (y + entry_height >= 0 && y < 240) {
-                C2D_TextParse(&text, dynamic_textbuf, i < dirCount ? dirs[i] : files[i - dirCount]);
-                C2D_TextOptimize(&text);
+                C2D_TextParse(&path_text, dynamic_textbuf, i < dirCount ? dirs[i] : files[i - dirCount]);
+                C2D_TextOptimize(&path_text);
                 C2D_DrawRectSolid(56, y, 0, 264, entry_height, clicked_entry == i ? TINT_50 : TINT_100);
                 if (cursor == i) C2D_DrawRectSolid(56 + 4, y + entry_height - 8, 0, 264 - 8, 1, BLACK);
-                C2D_DrawText(&text, C2D_AlignLeft, 64, y + 8, 0, 0.5, 0.5);
+                C2D_DrawText(&path_text, C2D_AlignLeft, 64, y + 8, 0, 0.5, 0.5);
             }
             y += entry_height;
         }
@@ -1011,14 +1277,26 @@ static void rom_loader(void) {
             C2D_DrawRectSolid(320-2, 32 + (240-32-8) * (scroll_pos - scroll_top) / (scroll_bottom - scroll_top), 0, 2, 8, TINT_COLOR);
         }
         // path
-        C2D_TextParse(&text, dynamic_textbuf, path);
-        C2D_TextOptimize(&text);
+        C2D_TextParse(&path_text, dynamic_textbuf, path);
+        C2D_TextOptimize(&path_text);
         C2D_DrawRectSolid(0, 0, 0, 320, 32, BLACK);
-        C2D_DrawText(&text, C2D_AlignLeft | C2D_WithColor, 48, 8, 0, 0.5, 0.5, TINT_COLOR);
+
+        if (message) {
+            C2D_Text message_text;
+            C2D_TextParse(&message_text, dynamic_textbuf, message);
+            C2D_TextOptimize(&message_text);
+            C2D_DrawText(&message_text, C2D_AlignLeft | C2D_WithColor, 48, 0, 0, 0.5, 0.5, TINT_COLOR);
+            C2D_DrawText(&path_text, C2D_AlignLeft | C2D_WithColor, 48, 16, 0, 0.5, 0.5, TINT_COLOR);
+        } else {
+            C2D_DrawText(&path_text, C2D_AlignLeft | C2D_WithColor, 48, 8, 0, 0.5, 0.5, TINT_COLOR);
+        }
 
         // up button indicator
         C2D_DrawText(&text_btn_X, C2D_AlignLeft | C2D_WithColor, 8, 32, 0, 0.7, 0.7, TINT_COLOR);
     LOOP_END(rom_loader_buttons);
+
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN
 
     buttonLock = false;
 
@@ -1032,6 +1310,7 @@ static void rom_loader(void) {
     if (clicked_entry < 0) {
         switch (button) {
             case ROM_LOADER_UP: // Up
+            {
                 strcpy(old_dir, path);
                 // cut trailing slash from old dir
                 char *last_slash = strrchr(old_dir, '/');
@@ -1044,15 +1323,18 @@ static void rom_loader(void) {
                     // so we can just get rid of the slash at the end
                     path[len - 1] = 0;
                 }
-                return rom_loader();
-            case ROM_LOADER_BACK: return main_menu(MAIN_MENU_LOAD_ROM);
+                [[gnu::musttail]] return rom_loader(message);
+            }
+            case ROM_LOADER_BACK: return false;
+            default: return false; // not gonna happen but fixes a compiler warning
         }
     } else if (clicked_entry < dirCount) {
-        return rom_loader();
+        [[gnu::musttail]] return rom_loader(message);
     } else {
         // clear screen buffer
         for (int i = 0; i < 2; i++) {
             C2D_TargetClear(screenTargetHard[i], 0);
+            C2D_TargetClear(finalScreen[i], 0);
         }
         tDSPCACHE.DDSPDataState[0] = tDSPCACHE.DDSPDataState[1] = GPU_CLEAR;
         for (int i = 0; i < 2; i++) {
@@ -1060,7 +1342,6 @@ static void rom_loader(void) {
                 tDSPCACHE.SoftBufWrote[i][j].min = 0xff;
                 tDSPCACHE.SoftBufWrote[i][j].max = 0;
             }
-            memset(&tDSPCACHE.OpaquePixels, 0, sizeof(tDSPCACHE.OpaquePixels));
         }
         C3D_FrameBegin(0);
         video_flush(true);
@@ -1074,8 +1355,627 @@ static void rom_loader(void) {
         // we know there's a dot
         strcpy(strrchr(tVBOpt.RAM_PATH, '.'), ".ram");
         saveFileOptions();
-        return load_rom();
+        [[gnu::musttail]] return load_rom(message);
     }
+}
+
+static void multiplayer_main(int initial_button, bool init_uds) {
+    Result res;
+    if (init_uds) {
+        res = udsInit(0x3000, NULL);
+        if (R_FAILED(res)) {
+            return multiplayer_error(res, &text_multi_init_error, true);
+        }
+    }
+    menu_start:
+    LOOP_BEGIN(multiplayer_main_buttons, initial_button);
+        C2D_DrawText(&text_multi_reset_on_join, C2D_AlignCenter | C2D_WithColor, 320 / 2, 140, 0, 0.7, 0.7, TINT_COLOR);
+    LOOP_END(multiplayer_main_buttons);
+    switch (button) {
+        case MULTI_MAIN_HOST:
+            if (game_running || rom_loader("Pick a game to host.")) {
+                res = create_network();
+                if (R_FAILED(res)) {
+                    udsExit();
+                    [[gnu::musttail]] return multiplayer_error(res, &text_multi_init_error, true);
+                } else {
+                    [[gnu::musttail]] return multiplayer_host();
+                }
+            } else {
+                goto menu_start;
+            }
+        case MULTI_MAIN_JOIN:
+            [[gnu::musttail]] return multiplayer_join();
+        case MULTI_MAIN_BACK:
+            udsExit();
+            is_multiplayer = false;
+            [[gnu::musttail]] return main_menu(MAIN_MENU_MULTI);
+    }
+}
+
+static void multiplayer_host() {
+    C2D_Text rom_text, version_text;
+    C2D_TextBufClear(dynamic_textbuf);
+    char buf[96];
+    NetAppData appdata;
+    udsGetApplicationData(&appdata, sizeof(appdata), NULL);
+    appdata.rom_name[sizeof(appdata.rom_name) - 1] = 0;
+    snprintf(buf, sizeof(buf), "%s\nCRC32: %08lX", appdata.rom_name, tVBOpt.CRC32);
+    C2D_TextParse(&rom_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&rom_text);
+    C2D_TextParse(&version_text, dynamic_textbuf, "Red Viper " VERSION);
+    C2D_TextOptimize(&version_text);
+
+    bool connected = false;
+    bool dlplay = false;
+    int dlplay_progress = -1;
+
+    multiplayer_host_buttons[MULTI_HOST_CHANGE].hidden = tVBOpt.FORWARDER;
+
+    udsConnectionStatus status;
+    LOOP_BEGIN(multiplayer_host_buttons, -1);
+        if (udsWaitConnectionStatusEvent(false, false)) {
+            udsGetConnectionStatus(&status);
+            if (!connected && status.total_nodes > 1) {
+                udsSetNewConnectionsBlocked(true, true, false);
+                connected = true;
+                multiplayer_host_buttons[MULTI_HOST_CHANGE].hidden = true;
+            } else if (connected && (status.total_nodes < 2 || status.status == 11)) {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+            }
+        }
+
+        if (connected) {
+            if (dlplay_progress < 0) {
+                Packet *read_packet = read_next_packet();
+                if (read_packet) {
+                    if (read_packet->packet_type == PACKET_LOADED) {
+                        C3D_FrameEnd(0);
+                        [[gnu::musttail]] return multiplayer_ready_room(true, 0);
+                    } else if (read_packet->packet_type == PACKET_DLPLAY_RQ) {
+                        Packet *send_packet = new_packet_to_send();
+                        send_packet->packet_type = PACKET_DLPLAY_SIZE;
+                        send_packet->dlplay_size.rom_size = V810_ROM1.size;
+                        ship_packet(send_packet);
+                        dlplay_progress = 0;
+                    }
+                }
+            }
+            if (dlplay_progress >= 0) {
+                Packet *send_packet;
+                while (dlplay_progress < V810_ROM1.size && (send_packet = new_packet_to_send())) {
+                    send_packet->packet_type = PACKET_DATA;
+                    memcpy(send_packet->data.data, V810_ROM1.pmemory + dlplay_progress, sizeof(send_packet->data.data));
+                    dlplay_progress += sizeof(send_packet->data.data);
+                    ship_packet(send_packet);
+                }
+
+                // once they're done they'll send a PACKET_LOADED
+                // also always read packets to ensure the buffer is clear of nops
+                Packet *read_packet = read_next_packet();
+                if (read_packet && read_packet->packet_type == PACKET_LOADED) {
+                    C3D_FrameEnd(0);
+                    [[gnu::musttail]] return multiplayer_ready_room(true, 0);
+                }
+            }
+        }
+
+        if (!connected) {
+            C2D_DrawText(&text_multi_waiting, C2D_AlignCenter | C2D_WithColor, 320 / 2, 60, 0, 0.7, 0.7, TINT_COLOR);
+        } else {
+            C2D_DrawText(&text_multi_preparing, C2D_AlignCenter | C2D_WithColor, 320 / 2, 60, 0, 0.7, 0.7, TINT_COLOR);
+        }
+        C2D_DrawText(&rom_text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 100, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&version_text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 150, 0, 0.5, 0.5, TINT_COLOR);
+    LOOP_END(multiplayer_host_buttons);
+    local_disconnect();
+    if (button == MULTI_HOST_CHANGE && rom_loader("Pick a game to host.") && game_running) {
+        Result res = create_network();
+        if (R_FAILED(res)) {
+            udsExit();
+            [[gnu::musttail]] return multiplayer_error(res, &text_multi_init_error, true);
+        } else {
+            [[gnu::musttail]] return multiplayer_host();
+        }
+    } else {
+        [[gnu::musttail]] return multiplayer_main(MULTI_MAIN_HOST, false);
+    }
+}
+
+static void multiplayer_forwarder_crc32_mismatch(NetAppData *appdata) {
+    char buf[96];
+    C2D_Text my_game_text;
+    C2D_Text my_crc32_text;
+    C2D_Text their_game_text;
+    C2D_Text their_crc32_text;
+
+    appdata->rom_name[sizeof(appdata->rom_name) - 1] = 0;
+
+    C2D_TextBufClear(dynamic_textbuf);
+
+    snprintf(buf, sizeof(buf), "Their game: %s", appdata->rom_name);
+    C2D_TextParse(&their_game_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&their_game_text);
+
+    snprintf(buf, sizeof(buf), "CRC32: %08lX", appdata->rom_crc32);
+    C2D_TextParse(&their_crc32_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&their_crc32_text);
+
+    char *filename = strrchr(tVBOpt.ROM_PATH, '/');
+    if (filename) filename++;
+    else filename = tVBOpt.ROM_PATH;
+    snprintf(buf, sizeof(buf), "Your game: %s", filename);
+    char *lastdot = strrchr(buf, '.');
+    if (lastdot) *lastdot = 0;
+    C2D_TextParse(&my_game_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&my_game_text);
+
+    snprintf(buf, sizeof(buf), "CRC32: %08lX", tVBOpt.CRC32);
+    C2D_TextParse(&my_crc32_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&my_crc32_text);
+
+    LOOP_BEGIN(multiplayer_error_buttons, 0);
+        C2D_DrawText(&text_multi_no_match, C2D_AlignCenter | C2D_WithColor, 320/2, 20, 0, 0.7, 0.7, TINT_COLOR);
+        C2D_DrawText(&my_game_text, C2D_AlignCenter | C2D_WithColor, 320/2, 55, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&my_crc32_text, C2D_AlignCenter | C2D_WithColor, 320/2, 70, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&their_game_text, C2D_AlignCenter | C2D_WithColor, 320/2, 90, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&their_crc32_text, C2D_AlignCenter | C2D_WithColor, 320/2, 105, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&text_forwarder_nomatch, C2D_AlignCenter | C2D_WithColor, 320/2, 140, 0, 0.5, 0.5, TINT_COLOR);
+    LOOP_END(multiplayer_error_buttons);
+
+    [[gnu::musttail]] return multiplayer_join();
+}
+
+static bool multiplayer_areyousure_version(char *their_version) {
+    char buf[48];
+    snprintf(buf, sizeof(buf), "Their version: %s", their_version);
+    C2D_Text their_version_text;
+    C2D_TextBufClear(dynamic_textbuf);
+    C2D_TextParse(&their_version_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&their_version_text);
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN false
+    LOOP_BEGIN(areyousure_buttons, AREYOUSURE_NO);
+        C2D_DrawText(&text_version_mismatch, C2D_AlignCenter | C2D_WithColor, 320 / 2, 35, 0, 0.7, 0.7, TINT_COLOR);
+        C2D_DrawText(&text_your_version, C2D_AlignCenter | C2D_WithColor, 320 / 2, 105, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&their_version_text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 120, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&text_connect_anyway, C2D_AlignCenter | C2D_WithColor, 320 / 2, 140, 0, 0.7, 0.7, TINT_COLOR);
+    LOOP_END(areyousure_buttons);
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN
+    return button == AREYOUSURE_YES;
+}
+
+static void multiplayer_join() {
+    udsNetworkScanInfo *networks;
+    size_t total_networks;
+    scan_beacons(&networks, &total_networks);
+
+    C2D_TextBufClear(dynamic_textbuf);
+
+    static C2D_Text info_texts[MULTI_JOIN_COUNT];
+
+    for (int i = 0; i < MULTI_JOIN_COUNT; i++) {
+        multiplayer_join_buttons[i].hidden = i >= total_networks;
+        if (!multiplayer_join_buttons[i].hidden) {
+            char name_text[11] = {0};
+            udsGetNodeInfoUsername(&networks[i].nodes[0], name_text);
+            C2D_TextParse(&multiplayer_join_buttons[i].text, dynamic_textbuf, name_text);
+            C2D_TextOptimize(&multiplayer_join_buttons[i].text);
+
+            NetAppData appdata;
+            size_t real_appdata_size;
+            udsGetNetworkStructApplicationData(&networks[i].network, &appdata, sizeof(appdata), &real_appdata_size);
+            char *info_text;
+            if (real_appdata_size != sizeof(appdata) || appdata.protocol_version != PROTOCOL_VERSION) {
+                info_text = "Version mismatch!";
+            } else {
+                // just in case
+                appdata.rom_name[sizeof(appdata.rom_name)-1] = 0;
+                info_text = appdata.rom_name;
+            }
+            multiplayer_join_buttons[i].show_toggle = true;
+            multiplayer_join_buttons[i].toggle = false;
+            multiplayer_join_buttons[i].toggle_text_off = &info_texts[i];
+            C2D_TextParse(&info_texts[i], dynamic_textbuf, info_text);
+            C2D_TextOptimize(&info_texts[i]);
+        }
+    }
+
+    C2D_Text version_text;
+    C2D_TextParse(&version_text, dynamic_textbuf, VERSION);
+    C2D_TextOptimize(&version_text);
+
+    LOOP_BEGIN(multiplayer_join_buttons, 0);
+        C2D_DrawText(&version_text, C2D_AlignCenter | C2D_WithColor, 320/2, 220, 0, 0.5, 0.5, TINT_COLOR);
+    LOOP_END(multiplayer_join_buttons);
+    if (button < MULTI_JOIN_COUNT) {
+        // static to aid calls to multiplayer_forwarder_crc32_mismatch
+        static NetAppData appdata;
+        size_t real_appdata_size;
+        udsGetNetworkStructApplicationData(&networks[button].network, &appdata, sizeof(appdata), &real_appdata_size);
+        appdata.emulator_version[sizeof(appdata.emulator_version) - 1] = 0;
+        if (real_appdata_size != sizeof(appdata) || appdata.protocol_version != PROTOCOL_VERSION) {
+            udsExit();
+            [[gnu::musttail]] return multiplayer_error(0, &text_protocol_mismatch, true);
+        } else if (tVBOpt.FORWARDER && tVBOpt.CRC32 != appdata.rom_crc32) {
+            [[gnu::musttail]] return multiplayer_forwarder_crc32_mismatch(&appdata);
+        } else if (strcmp(appdata.emulator_version, VERSION) != 0 && !multiplayer_areyousure_version(appdata.emulator_version)) {
+            [[gnu::musttail]] return multiplayer_join();
+        } else {
+            Result res = connect_to_network(&networks[button].network);
+            if (R_FAILED(res)) {
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(res, &text_multi_comm_error, true);
+            } else {
+                udsGetApplicationData(&appdata, sizeof(appdata), &real_appdata_size);
+                if (real_appdata_size != sizeof(appdata) || appdata.protocol_version != PROTOCOL_VERSION) {
+                    local_disconnect();
+                    udsExit();
+                    [[gnu::musttail]] return multiplayer_error(1, &text_multi_comm_error, true);
+                } else if (game_running && appdata.rom_crc32 == tVBOpt.CRC32) {
+                    Packet *send_packet = new_packet_to_send();
+                    send_packet->packet_type = PACKET_LOADED;
+                    ship_packet(send_packet);
+                    [[gnu::musttail]] return multiplayer_ready_room(false, 0);
+                } else if (tVBOpt.FORWARDER) {
+                    local_disconnect();
+                    [[gnu::musttail]] return multiplayer_forwarder_crc32_mismatch(&appdata);
+                } else {
+                    [[gnu::musttail]] return multiplayer_prepare_join(0);
+                }
+            }
+        }
+    } else if (button == MULTI_JOIN_REFRESH) {
+        [[gnu::musttail]] return multiplayer_join();
+    } else if (button == MULTI_JOIN_BACK) {
+        [[gnu::musttail]] return multiplayer_main(MULTI_MAIN_JOIN, false);
+    }
+}
+
+static void multiplayer_prepare_join(int initial_button) {
+    char buf[96];
+    C2D_Text my_game_text;
+    C2D_Text my_crc32_text;
+    C2D_Text their_game_text;
+    C2D_Text their_crc32_text;
+
+    Packet *send_packet;
+
+    if (tVBOpt.FORWARDER) {
+        multiplayer_prepare_join_buttons[MULTI_PREPARE_SD].hidden = true;
+        multiplayer_prepare_join_buttons[MULTI_PREPARE_DLPLAY].hidden = true;
+    }
+
+    NetAppData appdata;
+    udsGetApplicationData(&appdata, sizeof(appdata), NULL);
+    appdata.rom_name[sizeof(appdata.rom_name) - 1] = 0;
+
+    C2D_TextBufClear(dynamic_textbuf);
+
+    snprintf(buf, sizeof(buf), "Their game: %s", appdata.rom_name);
+    C2D_TextParse(&their_game_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&their_game_text);
+
+    snprintf(buf, sizeof(buf), "CRC32: %08lX", appdata.rom_crc32);
+    C2D_TextParse(&their_crc32_text, dynamic_textbuf, buf);
+    C2D_TextOptimize(&their_crc32_text);
+
+    if (game_running) {
+        char *filename = strrchr(tVBOpt.ROM_PATH, '/');
+        if (filename) filename++;
+        else filename = tVBOpt.ROM_PATH;
+        snprintf(buf, sizeof(buf), "Your game: %s", filename);
+        char *lastdot = strrchr(buf, '.');
+        if (lastdot) *lastdot = 0;
+        C2D_TextParse(&my_game_text, dynamic_textbuf, buf);
+        C2D_TextOptimize(&my_game_text);
+
+        snprintf(buf, sizeof(buf), "CRC32: %08lX", tVBOpt.CRC32);
+        C2D_TextParse(&my_crc32_text, dynamic_textbuf, buf);
+        C2D_TextOptimize(&my_crc32_text);
+    }
+
+    LOOP_BEGIN(multiplayer_prepare_join_buttons, initial_button);
+        if (udsWaitConnectionStatusEvent(false, false)) {
+            udsConnectionStatus status;
+            udsGetConnectionStatus(&status);
+            if (status.total_nodes < 2 || status.status == 11) {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+            }
+        }
+
+        if (game_running) {
+            C2D_DrawText(&text_multi_no_match, C2D_AlignCenter | C2D_WithColor, 320/2, 20, 0, 0.7, 0.7, TINT_COLOR);
+            C2D_DrawText(&my_game_text, C2D_AlignCenter | C2D_WithColor, 320/2, 55, 0, 0.5, 0.5, TINT_COLOR);
+            C2D_DrawText(&my_crc32_text, C2D_AlignCenter | C2D_WithColor, 320/2, 70, 0, 0.5, 0.5, TINT_COLOR);
+        } else {
+            C2D_DrawText(&text_multi_not_loaded, C2D_AlignCenter | C2D_WithColor, 320/2, 30, 0, 0.7, 0.7, TINT_COLOR);
+        }
+        C2D_DrawText(&their_game_text, C2D_AlignCenter | C2D_WithColor, 320/2, 90, 0, 0.5, 0.5, TINT_COLOR);
+        C2D_DrawText(&their_crc32_text, C2D_AlignCenter | C2D_WithColor, 320/2, 105, 0, 0.5, 0.5, TINT_COLOR);
+
+        C2D_DrawText(&text_dlplay_saving, C2D_AlignRight | C2D_WithColor, 310, 200, 0, 0.5, 0.5, TINT_COLOR);
+    LOOP_END(multiplayer_prepare_join_buttons);
+
+    switch (button) {
+        case MULTI_PREPARE_SD:
+            snprintf(buf, sizeof(buf), "Please load: %s", appdata.rom_name);
+            if (rom_loader(buf) && tVBOpt.CRC32 == appdata.rom_crc32) {
+                send_packet = new_packet_to_send();
+                send_packet->packet_type = PACKET_LOADED;
+                ship_packet(send_packet);
+                [[gnu::musttail]] return multiplayer_ready_room(false, 0);
+            } else {
+                [[gnu::musttail]] return multiplayer_prepare_join(MULTI_PREPARE_SD);
+            }
+            break;
+        case MULTI_PREPARE_DLPLAY:
+            send_packet = new_packet_to_send();
+            send_packet->packet_type = PACKET_DLPLAY_RQ;
+            ship_packet(send_packet);
+            [[gnu::musttail]] return multiplayer_dlplay();
+        case MULTI_PREPARE_LEAVE:
+            local_disconnect();
+            [[gnu::musttail]] return multiplayer_main(MULTI_MAIN_JOIN, false);
+    }
+}
+
+static void multiplayer_dlplay(void) {
+    NetAppData appdata;
+    udsGetApplicationData(&appdata, sizeof(appdata), NULL);
+    appdata.rom_name[sizeof(appdata.rom_name) - 1] = 0;
+
+    game_running = false;
+    bool size_received = false;
+    int dlplay_progress = 0;
+    LOOP_BEGIN(multiplayer_dlplay_buttons, -1);
+        if (udsWaitConnectionStatusEvent(false, false)) {
+            udsConnectionStatus status;
+            udsGetConnectionStatus(&status);
+            if (status.total_nodes < 2 || status.status == 11) {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+            }
+        }
+        bool packet_received = false;
+        Packet *recv_packet;
+        if (!size_received && (recv_packet = read_next_packet())) {
+            packet_received = true;
+            if (recv_packet->packet_type == PACKET_DLPLAY_SIZE) {
+                int rom_size = recv_packet->dlplay_size.rom_size;
+                if (rom_size > MAX_ROM_SIZE || ((rom_size - 1) & rom_size)) {
+                    C3D_FrameEnd(0);
+                    local_disconnect();
+                    udsExit();
+                    [[gnu::musttail]] return multiplayer_error(0, &text_multi_init_error, true);
+                }
+                V810_ROM1.size = rom_size;
+                V810_ROM1.highaddr = 0x7000000 + rom_size - 1;
+                size_received = true;
+            }
+        }
+        while (size_received && (recv_packet = read_next_packet())) {
+            packet_received = true;
+            if (recv_packet->packet_type == PACKET_DATA) {
+                memcpy(V810_ROM1.pmemory + dlplay_progress, recv_packet->data.data, sizeof(recv_packet->data.data));
+                dlplay_progress += sizeof(recv_packet->data.data);
+            }
+        }
+        if (packet_received && send_queue_empty()) {
+            Packet *send_packet = new_packet_to_send();
+            send_packet->packet_type = PACKET_NOP;
+            ship_packet(send_packet);
+        }
+        if (size_received && dlplay_progress == V810_ROM1.size) {
+            // fill the rest of the address space with copies of the rom
+            for (int i = V810_ROM1.size; i < MAX_ROM_SIZE; i += V810_ROM1.size) {
+                memcpy(V810_ROM1.pmemory + i, V810_ROM1.pmemory, V810_ROM1.size);
+            }
+            tVBOpt.RAM_PATH[0] = 0;
+            game_running = true;
+            is_sram = false;
+            gen_table();
+            tVBOpt.CRC32 = get_crc(V810_ROM1.size);
+            tVBOpt.GAME_ID = MAKE_GAMEID((char*)(V810_ROM1.off + (V810_ROM1.highaddr & 0xFFFFFDF9)));
+            apply_patches();
+            v810_reset();
+
+            Packet *send_packet = new_packet_to_send();
+            send_packet->packet_type = PACKET_LOADED;
+            ship_packet(send_packet);
+
+            C3D_FrameEnd(0);
+            [[gnu::musttail]] return multiplayer_ready_room(false, 0);
+        }
+
+        if (size_received) C2D_DrawRectSolid(60, 140, 0, 200, 16, C2D_Color32(0.5 * TINT_R, 0.5 * TINT_G, 0.5 * TINT_B, 255));
+        if (size_received) {
+            C2D_DrawRectSolid(60, 140, 0, 200 * dlplay_progress / V810_ROM1.size, 16, C2D_Color32(TINT_R, TINT_G, TINT_B, 255));
+        }
+
+        C2D_TextBufClear(dynamic_textbuf);
+
+
+        C2D_DrawText(&text_downloading, C2D_AlignCenter | C2D_WithColor, 320/2, 60, 0, 0.7, 0.7, TINT_COLOR);
+
+        C2D_Text game_name_text;
+        C2D_TextParse(&game_name_text, dynamic_textbuf, appdata.rom_name);
+        C2D_TextOptimize(&game_name_text);
+        C2D_DrawText(&game_name_text, C2D_AlignCenter | C2D_WithColor, 320/2, 85, 0, 0.5, 0.5, TINT_COLOR);
+
+        C2D_Text progress_text;
+        char progress_buf[20];
+        snprintf(progress_buf, sizeof(progress_buf), "Progress: %5.2f%%", dlplay_progress * 100.0 / V810_ROM1.size);
+        C2D_TextParse(&progress_text, dynamic_textbuf, progress_buf);
+        C2D_TextOptimize(&progress_text);
+        C2D_DrawText(&progress_text, C2D_AlignLeft | C2D_WithColor, 320/2 - 80, 110, 0, 0.7, 0.7, TINT_COLOR);
+    LOOP_END(multiplayer_dlplay_buttons);
+    local_disconnect();
+    udsExit();
+    [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+}
+
+static void multiplayer_sram_transfer() {
+    int send_progress = 0;
+    int recv_progress = 0;
+    if (my_player_id == 1) {
+        memcpy(vb_players[1].V810_GAME_RAM.pmemory, vb_players[0].V810_GAME_RAM.pmemory, vb_players[0].V810_GAME_RAM.size);
+    }
+    LOOP_BEGIN(no_buttons, -1);
+        if (udsWaitConnectionStatusEvent(false, false)) {
+            udsConnectionStatus status;
+            udsGetConnectionStatus(&status);
+            if (status.total_nodes < 2 || status.status == 11) {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+            }
+        }
+        Packet *send_packet;
+        while (send_progress < vb_state->V810_GAME_RAM.size && (send_packet = new_packet_to_send())) {
+            send_packet->packet_type = PACKET_DATA;
+            memcpy(send_packet->data.data, vb_players[my_player_id].V810_GAME_RAM.pmemory + send_progress, sizeof(send_packet->data.data));
+            send_progress += sizeof(send_packet->data.data);
+            ship_packet(send_packet);
+        }
+        bool recvd_packet = false;
+        Packet *recv_packet;
+        while (recv_progress < vb_state->V810_GAME_RAM.size && (recv_packet = read_next_packet())) {
+            recvd_packet = true;
+            if (recv_packet->packet_type == PACKET_DATA) {
+                memcpy(vb_players[!my_player_id].V810_GAME_RAM.pmemory + recv_progress, recv_packet->data.data, sizeof(recv_packet->data.data));
+                recv_progress += sizeof(recv_packet->data.data);
+            } else {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(1, &text_multi_comm_error, true);
+            }
+        }
+        // send nops so any acks can get through
+        if (!recvd_packet && send_queue_empty() && (send_packet = new_packet_to_send())) {
+            send_packet->packet_type = PACKET_NOP;
+            ship_packet(send_packet);
+        }
+        C2D_DrawRectSolid(60, 140, 0, 200, 16, C2D_Color32(0.5 * TINT_R, 0.5 * TINT_G, 0.5 * TINT_B, 255));
+        C2D_DrawRectSolid(60, 140, 0, 200 * recv_progress / vb_state->V810_GAME_RAM.size, 16, C2D_Color32(TINT_R, TINT_G, TINT_B, 255));
+        if (send_progress == vb_state->V810_GAME_RAM.size && recv_progress == vb_state->V810_GAME_RAM.size) {
+            loop = false;
+            guiop = AKILL | VBRESET;
+        }
+    LOOP_END(no_buttons);
+}
+
+static void multiplayer_ready_room(bool is_host, int initial_button) {
+    multiplayer_ready_room_buttons[MULTI_READY_BUFFER_MINUS].hidden = !is_host;
+    multiplayer_ready_room_buttons[MULTI_READY_BUFFER_PLUS].hidden = !is_host;
+
+    char player_name[11] = {0};
+    char player_str[16];
+    C2D_Text p1_text;
+    C2D_Text p2_text;
+    C2D_Text buffer_text;
+    multiplayer_ready_room_buttons[MULTI_READY_START].hidden = !is_host;
+    {
+        udsConnectionStatus status;
+        udsGetConnectionStatus(&status);
+        is_multiplayer = true;
+        my_player_id = status.cur_NetworkNodeID - 1;
+    }
+    C2D_TextBufClear(dynamic_textbuf);
+    udsNodeInfo node_info = {0};
+
+    udsGetNodeInformation(1, &node_info);
+    udsGetNodeInfoUsername(&node_info, player_name);
+    snprintf(player_str, sizeof(player_str), "P1: %s", player_name);
+    C2D_TextParse(&p1_text, dynamic_textbuf, player_str);
+    C2D_TextOptimize(&p1_text);
+
+    memset(player_name, 0, sizeof(player_name));
+    udsGetNodeInformation(2, &node_info);
+    udsGetNodeInfoUsername(&node_info, player_name);
+    snprintf(player_str, sizeof(player_str), "P2: %s", player_name);
+    C2D_TextParse(&p2_text, dynamic_textbuf, player_str);
+    C2D_TextOptimize(&p2_text);
+
+    snprintf(player_str, sizeof(player_str), "%d", tVBOpt.INPUT_BUFFER);
+    C2D_TextParse(&buffer_text, dynamic_textbuf, player_str);
+    C2D_TextOptimize(&buffer_text);
+
+    LOOP_BEGIN(multiplayer_ready_room_buttons, initial_button);
+        if (udsWaitConnectionStatusEvent(false, false)) {
+            udsConnectionStatus status;
+            udsGetConnectionStatus(&status);
+            if (status.total_nodes < 2 || status.status == 11) {
+                C3D_FrameEnd(0);
+                local_disconnect();
+                udsExit();
+                [[gnu::musttail]] return multiplayer_error(0, &text_multi_disconnect, true);
+            }
+        }
+        if (!is_host) {
+            Packet *packet = read_next_packet();
+            if (packet) {
+                if (packet->packet_type == PACKET_RESUME) {
+                    if (packet->resume.input_buffer <= INPUT_BUFFER_MAX) {
+                        tVBOpt.INPUT_BUFFER = packet->resume.input_buffer;
+                    }
+                    loop = false;
+                    button = MULTI_READY_START;
+                }
+            }
+        }
+        C2D_DrawText(&p1_text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.7, 0.7, TINT_COLOR);
+        C2D_DrawText(&p2_text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 110, 0, 0.7, 0.7, TINT_COLOR);
+        if (is_host) {
+            C2D_DrawText(&text_input_buffer, C2D_AlignRight | C2D_WithColor, 180 - 8, 144, 0, 0.7, 0.7, TINT_COLOR);
+            C2D_DrawText(&buffer_text, C2D_AlignCenter | C2D_WithColor, 180 + 48, 144, 0, 0.7, 0.7, TINT_COLOR);
+        }
+    LOOP_END(multiplayer_ready_room_buttons);
+    switch (button) {
+        case MULTI_READY_START:
+            if (is_host) {
+                // should be ok if we haven't sent anything yet
+                Packet *packet = new_packet_to_send();
+                packet->packet_type = PACKET_RESUME;
+                packet->resume.input_buffer = tVBOpt.INPUT_BUFFER;
+                ship_packet(packet);
+            }
+            [[gnu::musttail]] return multiplayer_sram_transfer();
+        case MULTI_READY_BUFFER_MINUS:
+            if (tVBOpt.INPUT_BUFFER > 1) tVBOpt.INPUT_BUFFER--;
+            [[gnu::musttail]] return multiplayer_ready_room(is_host, MULTI_READY_BUFFER_MINUS);
+        case MULTI_READY_BUFFER_PLUS:
+            if (tVBOpt.INPUT_BUFFER < INPUT_BUFFER_MAX) tVBOpt.INPUT_BUFFER++;
+            [[gnu::musttail]] return multiplayer_ready_room(is_host, MULTI_READY_BUFFER_PLUS);
+        case MULTI_READY_LEAVE:
+            local_disconnect();
+            [[gnu::musttail]] return multiplayer_main(is_host ? MULTI_MAIN_HOST : MULTI_MAIN_JOIN, false);
+    }
+}
+
+static void multiplayer_error(int err, C2D_Text *message, bool exit_to_menu) {
+    C2D_Text text;
+    char code_message[32];
+    snprintf(code_message, sizeof(code_message), "Error code: %d", err);
+    C2D_TextParse(&text, dynamic_textbuf, code_message);
+    C2D_TextOptimize(&text);
+    LOOP_BEGIN(multiplayer_error_buttons, 0);
+        C2D_DrawText(message, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.5, 0.5, TINT_COLOR);
+        if (err != 0) C2D_DrawText(&text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 120, 0, 0.5, 0.5, TINT_COLOR);
+    LOOP_END(multiplayer_error_buttons);
+    is_multiplayer = false;
+    if (exit_to_menu) [[gnu::musttail]] return main_menu(MAIN_MENU_MULTI);
 }
 
 static void controls(int initial_button) {
@@ -1091,20 +1991,24 @@ static void controls(int initial_button) {
         case CONTROLS_CONTROL_SCHEME:
             tVBOpt.CUSTOM_CONTROLS = !tVBOpt.CUSTOM_CONTROLS;
             tVBOpt.MODIFIED = true;
-            return controls(CONTROLS_CONTROL_SCHEME);
+            [[gnu::musttail]] return controls(CONTROLS_CONTROL_SCHEME);
         case CONTROLS_CONFIGURE_SCHEME:
-            return tVBOpt.CUSTOM_CONTROLS ? custom_3ds_mappings(CUSTOM_3DS_MAPPINGS_BACK) : preset_controls(0);
+            if (tVBOpt.CUSTOM_CONTROLS) {
+                [[gnu::musttail]] return custom_3ds_mappings(CUSTOM_3DS_MAPPINGS_BACK);
+            } else {
+                [[gnu::musttail]] return preset_controls(0);
+            }
         case CONTROLS_TOUCHSCREEN:
-            return touchscreen_settings();
+            [[gnu::musttail]] return touchscreen_settings();
         case CONTROLS_DISPLAY:
             tVBOpt.INPUTS = !tVBOpt.INPUTS;
             tVBOpt.MODIFIED = true;
-            return controls(CONTROLS_DISPLAY);
+            [[gnu::musttail]] return controls(CONTROLS_DISPLAY);
         case CONTROLS_CPP:
-            return cpp_options(0);
+            [[gnu::musttail]] return cpp_options(0);
         case CONTROLS_BACK:
             tVBOpt.CUSTOM_CONTROLS ? setCustomControls() : setPresetControls(buttons_on_screen);
-            return options(OPTIONS_CONTROLS);
+            [[gnu::musttail]] return options(OPTIONS_CONTROLS);
     }
 }
 
@@ -1122,7 +2026,7 @@ static void cpp_options(int initial_button) {
             } else {
                 cppExit();
             }
-            return cpp_options(button);
+            [[gnu::musttail]] return cpp_options(button);
         case CPP_CALIBRATE:
             toggleVsync(false);
             if (tVBOpt.CPP_ENABLED) cppExit();
@@ -1131,9 +2035,9 @@ static void cpp_options(int initial_button) {
             extraPadLaunch(&conf);
             if (tVBOpt.CPP_ENABLED) cppInit();
             toggleVsync(tVBOpt.VSYNC);
-            return cpp_options(button);
+            [[gnu::musttail]] return cpp_options(button);
         case CPP_BACK:
-            return controls(CONTROLS_CPP);
+            [[gnu::musttail]] return controls(CONTROLS_CPP);
     }
 }
 
@@ -1224,14 +2128,14 @@ static void custom_3ds_mappings(int initial_button) {
             current_custom_mapping_3ds_button_text = &text_custom_3ds_button_##CUSTOM_3DS_BUTTON; \
             current_custom_mapping_vb_option = &tVBOpt.CUSTOM_MAPPING_##CUSTOM_3DS_BUTTON; \
             current_custom_mapping_mod = &tVBOpt.CUSTOM_MOD[__builtin_ctz(KEY_##CUSTOM_3DS_BUTTON)]; \
-            return custom_vb_mappings(vb_button_code_to_vb_ui_button_index(tVBOpt.CUSTOM_MAPPING_##CUSTOM_3DS_BUTTON));
+            [[gnu::musttail]] return custom_vb_mappings(vb_button_code_to_vb_ui_button_index(tVBOpt.CUSTOM_MAPPING_##CUSTOM_3DS_BUTTON));
         PERFORM_FOR_EACH_3DS_BUTTON(CUSTOM_3DS_CASE)
         case CUSTOM_3DS_MAPPINGS_BACK:
-            return controls(CONTROLS_CONFIGURE_SCHEME);
+            [[gnu::musttail]] return controls(CONTROLS_CONFIGURE_SCHEME);
         case CUSTOM_3DS_MAPPINGS_RESET:
             setCustomMappingDefaults();
             tVBOpt.MODIFIED = true;
-            return custom_3ds_mappings(CUSTOM_3DS_MAPPINGS_RESET);
+            [[gnu::musttail]] return custom_3ds_mappings(CUSTOM_3DS_MAPPINGS_RESET);
     }
 }
 
@@ -1260,14 +2164,14 @@ static void custom_vb_mappings(int initial_button) {
         case CUSTOM_VB_MAPPINGS_##CUSTOM_VB_BUTTON: \
             *current_custom_mapping_vb_option = VB_##CUSTOM_VB_BUTTON; \
             tVBOpt.MODIFIED = true; \
-            return custom_3ds_mappings(current_custom_mapping_3ds_button);
+            [[gnu::musttail]] return custom_3ds_mappings(current_custom_mapping_3ds_button);
         PERFORM_FOR_EACH_VB_BUTTON(CUSTOM_VB_CASE)
         case CUSTOM_VB_MAPPINGS_MOD:
             *current_custom_mapping_mod = (*current_custom_mapping_mod + 1) % 3;
             tVBOpt.MODIFIED = true;
-            return custom_vb_mappings(button);
+            [[gnu::musttail]] return custom_vb_mappings(button);
         case CUSTOM_VB_MAPPINGS_BACK:
-            return custom_3ds_mappings(current_custom_mapping_3ds_button);
+            [[gnu::musttail]] return custom_3ds_mappings(current_custom_mapping_3ds_button);
     }
 }
 
@@ -1333,18 +2237,18 @@ static void preset_controls(int initial_button) {
         case PRESET_CONTROLS_FACE:
             tVBOpt.ABXY_MODE = (tVBOpt.ABXY_MODE + 1) % 6;
             tVBOpt.MODIFIED = true;
-            return preset_controls(PRESET_CONTROLS_FACE);
+            [[gnu::musttail]] return preset_controls(PRESET_CONTROLS_FACE);
         case PRESET_CONTROLS_SHOULDER:
             tVBOpt.ZLZR_MODE = (tVBOpt.ZLZR_MODE + 1) % 4;
             tVBOpt.MODIFIED = true;
-            return preset_controls(PRESET_CONTROLS_SHOULDER);
+            [[gnu::musttail]] return preset_controls(PRESET_CONTROLS_SHOULDER);
         case PRESET_CONTROLS_DPAD_MODE:
             tVBOpt.DPAD_MODE = (tVBOpt.DPAD_MODE + 1) % 3;
             tVBOpt.MODIFIED = true;
-            return preset_controls(PRESET_CONTROLS_DPAD_MODE);
+            [[gnu::musttail]] return preset_controls(PRESET_CONTROLS_DPAD_MODE);
         case PRESET_CONTROLS_BACK:
             setPresetControls(buttons_on_screen);
-            return controls(CONTROLS_CONFIGURE_SCHEME);
+            [[gnu::musttail]] return controls(CONTROLS_CONFIGURE_SCHEME);
     }
 }
 
@@ -1412,7 +2316,7 @@ static void touchscreen_settings() {
                     dest_x = tVBOpt.TOUCH_PADX - PAD_RAD - PAUSE_RAD;
                 if (dest_x > 192)
                     dest_x = 192;
-                if (dest_x < 80 + PAUSE_RAD) 
+                if (dest_x < 80 + PAUSE_RAD)
                     dest_x = 80 + PAUSE_RAD;
                 tVBOpt.PAUSE_RIGHT = dest_x;
             } else if (dragging != 0) {
@@ -1491,7 +2395,7 @@ static void touchscreen_settings() {
     buttonLock = false;
     switch (button) {
         case TOUCHSCREEN_BACK: // Back
-            return controls(CONTROLS_TOUCHSCREEN);
+            [[gnu::musttail]] return controls(CONTROLS_TOUCHSCREEN);
         case TOUCHSCREEN_RESET: // Reset
             tVBOpt.MODIFIED = true;
             tVBOpt.PAUSE_RIGHT = 160;
@@ -1501,15 +2405,15 @@ static void touchscreen_settings() {
             tVBOpt.TOUCH_BY = 160;
             tVBOpt.TOUCH_PADX = 240;
             tVBOpt.TOUCH_PADY = 128;
-            return touchscreen_settings();
+            [[gnu::musttail]] return touchscreen_settings();
         case TOUCHSCREEN_SWITCH:
             tVBOpt.MODIFIED = true;
             tVBOpt.TOUCH_SWITCH = !tVBOpt.TOUCH_SWITCH;
-            return touchscreen_settings();
+            [[gnu::musttail]] return touchscreen_settings();
         case TOUCHSCREEN_DEFAULT:
             tVBOpt.MODIFIED = true;
             tVBOpt.TOUCH_BUTTONS = buttons_on_screen;
-            return touchscreen_settings();
+            [[gnu::musttail]] return touchscreen_settings();
     }
 }
 
@@ -1735,15 +2639,15 @@ static void colour_filter(void) {
 
     switch (button) {
         case COLOUR_BACK: // Back
-            return barrier_settings(BARRIER_SETTINGS);
+            [[gnu::musttail]] return barrier_settings(BARRIER_SETTINGS);
         case COLOUR_RED: // Red
             tVBOpt.TINT = 0x0000ff;
             tVBOpt.MODIFIED = true;
-            return colour_filter();
+            [[gnu::musttail]] return colour_filter();
         case COLOUR_GRAY: // Gray
             tVBOpt.TINT = 0xffffff;
             tVBOpt.MODIFIED = true;
-            return colour_filter();
+            [[gnu::musttail]] return colour_filter();
     }
 }
 
@@ -1760,7 +2664,7 @@ static void multicolour_wheel(int palette_id, int colour_id) {
     const int scale_range = 3;
 
     bool dragging_scale = 0;
-    
+
     multicolour_wheel_buttons[MULTIWHEEL_SCALE].hidden = colour_id == 0;
 
     LOOP_BEGIN(multicolour_wheel_buttons, 0);
@@ -1780,7 +2684,7 @@ static void multicolour_wheel(int palette_id, int colour_id) {
         if (colour_id != 0) {
             touchPosition touch_pos;
             hidTouchRead(&touch_pos);
-            
+
             if ((hidKeysDown() & KEY_TOUCH)) {
                 if ((unsigned)(touch_pos.px - (scale_x)) < scale_width &&
                     abs((int)(touch_pos.py - scale_y)) < scale_height
@@ -1805,13 +2709,13 @@ static void multicolour_wheel(int palette_id, int colour_id) {
 
     switch (button) {
         case MULTIWHEEL_BACK:
-            return multicolour_settings(palette_id, colour_id);
+            [[gnu::musttail]] return multicolour_settings(palette_id, colour_id);
         case MULTIWHEEL_HEX:
             if (swkbd_colour(&tVBOpt.MTINT[palette_id][colour_id])) tVBOpt.MODIFIED = true;
-            return multicolour_wheel(palette_id, colour_id);
+            [[gnu::musttail]] return multicolour_wheel(palette_id, colour_id);
         case MULTIWHEEL_SCALE:
             if (swkbd_scale(&tVBOpt.STINT[palette_id][colour_id - 1])) tVBOpt.MODIFIED = true;
-            return multicolour_wheel(palette_id, colour_id);
+            [[gnu::musttail]] return multicolour_wheel(palette_id, colour_id);
     }
 }
 
@@ -1819,14 +2723,14 @@ static void multicolour_picker(int initial_button) {
     LOOP_BEGIN(multicolour_picker_buttons, initial_button);
     LOOP_END(multicolour_picker_buttons);
     if (button == MULTIPICKER_BACK) {
-        return barrier_settings(BARRIER_SETTINGS);
+        [[gnu::musttail]] return barrier_settings(BARRIER_SETTINGS);
     } else {
         if (tVBOpt.MULTIID != button / 2) {
             tVBOpt.MODIFIED = true;
             tVBOpt.MULTIID = button / 2;
         }
-        if (button % 2) return multicolour_settings(button / 2, 0);
-        else return multicolour_picker(button);
+        if (button % 2) [[gnu::musttail]] return multicolour_settings(button / 2, 0);
+        else [[gnu::musttail]] return multicolour_picker(button);
     }
 }
 
@@ -1881,9 +2785,9 @@ static void multicolour_settings(int palette_id, int initial_button) {
         C2D_DrawText(&lightest_scale, C2D_WithColor | C2D_AlignRight, 316, 48 * 3 + 36, 0, 0.7, 0.7, TINT_COLOR);
     LOOP_END(multicolour_settings_buttons);
     if (button == MULTI_BACK) {
-        return multicolour_picker(palette_id * 2 + 1);
+        [[gnu::musttail]] return multicolour_picker(palette_id * 2 + 1);
     } else {
-        return multicolour_wheel(palette_id, button);
+        [[gnu::musttail]] return multicolour_wheel(palette_id, button);
     }
 }
 
@@ -1961,10 +2865,10 @@ static void vblink(void) {
         if (success) {
             // success
             return;
-        } else return vblink();
+        } else [[gnu::musttail]] return vblink();
     } else {
         vblink_close();
-        return main_menu(game_running ? MAIN_MENU_RESUME : MAIN_MENU_LOAD_ROM);
+        [[gnu::musttail]] return main_menu(game_running ? MAIN_MENU_RESUME : MAIN_MENU_LOAD_ROM);
     }
 }
 
@@ -1981,18 +2885,18 @@ static void dev_options(int initial_button) {
         case PERF_BAR:
             tVBOpt.PERF_INFO = !tVBOpt.PERF_INFO;
             tVBOpt.MODIFIED = true;
-            return dev_options(PERF_BAR);
+            [[gnu::musttail]] return dev_options(PERF_BAR);
         case PERF_VIP:
             tVBOpt.VIP_OVERCLOCK = !tVBOpt.VIP_OVERCLOCK;
             tVBOpt.MODIFIED = true;
-            return dev_options(PERF_VIP);
+            [[gnu::musttail]] return dev_options(PERF_VIP);
         case PERF_N3DS:
             tVBOpt.N3DS_SPEEDUP = !tVBOpt.N3DS_SPEEDUP;
             tVBOpt.MODIFIED = true;
             osSetSpeedupEnable(tVBOpt.N3DS_SPEEDUP);
-            return dev_options(PERF_N3DS);
+            [[gnu::musttail]] return dev_options(PERF_N3DS);
         case PERF_BACK:
-            return options(OPTIONS_PERF);
+            [[gnu::musttail]] return options(OPTIONS_PERF);
     }
 }
 
@@ -2065,37 +2969,39 @@ static void options(int initial_button) {
     LOOP_END(options_buttons);
     switch (button) {
         case OPTIONS_VIDEO: // Video settings
-            return video_settings(0);
+            [[gnu::musttail]] return video_settings(0);
         case OPTIONS_FF: // Fast forward
             tVBOpt.FF_TOGGLE = !tVBOpt.FF_TOGGLE;
             tVBOpt.MODIFIED = true;
-            return options(OPTIONS_FF);
+            [[gnu::musttail]] return options(OPTIONS_FF);
         case OPTIONS_SOUND: // Sound
             tVBOpt.SOUND = !tVBOpt.SOUND;
-            return options(OPTIONS_SOUND);
+            [[gnu::musttail]] return options(OPTIONS_SOUND);
         case OPTIONS_PERF: // Developer settings
-            return dev_options(0);
-        case OPTIONS_CONTROLS: // About
-            return controls(0);
+            [[gnu::musttail]] return dev_options(0);
+        case OPTIONS_CONTROLS: // Controls
+            [[gnu::musttail]] return controls(0);
+        case OPTIONS_ABOUT: // About
+            [[gnu::musttail]] return about();
         case OPTIONS_BACK: // Back
-            return main_menu(MAIN_MENU_OPTIONS);
+            {return;}
         case OPTIONS_DEBUG: // Save debug info
-            return save_debug_info();
+            [[gnu::musttail]] return save_debug_info();
         case OPTIONS_SAVE_GLOBAL:
             if (tVBOpt.GAME_SETTINGS) deleteGameOptions();
             saveFileOptions();
-            return options(OPTIONS_BACK);
+            [[gnu::musttail]] return options(OPTIONS_BACK);
         case OPTIONS_RESET_TO_GLOBAL:
             if (tVBOpt.GAME_SETTINGS) deleteGameOptions();
             loadFileOptions();
-            return options(OPTIONS_BACK);
+            [[gnu::musttail]] return options(OPTIONS_BACK);
         case OPTIONS_SAVE_GAME:
             saveGameOptions();
-            return options(OPTIONS_BACK);
+            [[gnu::musttail]] return options(OPTIONS_BACK);
         case OPTIONS_DISCARD:
             loadFileOptions();
             if (game_running) loadGameOptions();
-            return options(OPTIONS_BACK);
+            [[gnu::musttail]] return options(OPTIONS_BACK);
     }
 }
 
@@ -2109,21 +3015,25 @@ static void video_settings(int initial_button) {
     LOOP_END(video_settings_buttons);
     switch (button) {
         case VIDEO_MODE:
-            toggleAnaglyph(!tVBOpt.ANAGLYPH, true);
+            toggleAnaglyph(!tVBOpt.ANAGLYPH);
             tVBOpt.MODIFIED = true;
-            return video_settings(button);
+            [[gnu::musttail]] return video_settings(button);
         case VIDEO_SETTINGS:
-            return tVBOpt.ANAGLYPH ? anaglyph_settings(0) : barrier_settings(0);
+            if (tVBOpt.ANAGLYPH) {
+                [[gnu::musttail]] return anaglyph_settings(0);
+            } else {
+                [[gnu::musttail]] return barrier_settings(0);
+            }
         case VIDEO_SLIDER:
             tVBOpt.SLIDERMODE = !tVBOpt.SLIDERMODE;
             tVBOpt.MODIFIED = true;
-            return video_settings(button);
+            [[gnu::musttail]] return video_settings(button);
         case VIDEO_ANTIFLICKER:
             tVBOpt.ANTIFLICKER = !tVBOpt.ANTIFLICKER;
             tVBOpt.MODIFIED = true;
-            return video_settings(button);
+            [[gnu::musttail]] return video_settings(button);
         case VIDEO_BACK:
-            return options(OPTIONS_VIDEO);
+            [[gnu::musttail]] return options(OPTIONS_VIDEO);
     }
 }
 
@@ -2136,15 +3046,19 @@ static void barrier_settings(int initial_button) {
         case BARRIER_MODE:
             tVBOpt.MULTICOL = !tVBOpt.MULTICOL;
             tVBOpt.MODIFIED = true;
-            return barrier_settings(button);
+            [[gnu::musttail]] return barrier_settings(button);
         case BARRIER_SETTINGS: // Colour filter
-            return tVBOpt.MULTICOL ? multicolour_picker(0) : colour_filter();
+            if (tVBOpt.MULTICOL) {
+                [[gnu::musttail]] return multicolour_picker(0);
+            } else {
+                [[gnu::musttail]] return colour_filter();
+            }
         case BARRIER_DEFAULT_EYE: // Default eye
             tVBOpt.DEFAULT_EYE = !tVBOpt.DEFAULT_EYE;
             tVBOpt.MODIFIED = true;
-            return barrier_settings(button);
+            [[gnu::musttail]] return barrier_settings(button);
         case BARRIER_BACK: // Back
-            return video_settings(VIDEO_SETTINGS);
+            [[gnu::musttail]] return video_settings(VIDEO_SETTINGS);
     }
 }
 
@@ -2215,13 +3129,13 @@ static void anaglyph_settings(int initial_button) {
     LOOP_END(anaglyph_settings_buttons);
     if (button < 8) {
         tVBOpt.ANAGLYPH_LEFT = button;
-        return anaglyph_settings(button);
+        [[gnu::musttail]] return anaglyph_settings(button);
     } else if (button < 16) {
         tVBOpt.ANAGLYPH_RIGHT = button;
-        return anaglyph_settings(button);
+        [[gnu::musttail]] return anaglyph_settings(button);
     } else switch (button) {
         case ANAGLYPH_BACK:
-            return video_settings(VIDEO_SETTINGS);
+            [[gnu::musttail]] return video_settings(VIDEO_SETTINGS);
     }
 }
 
@@ -2251,7 +3165,7 @@ static void savestate_error(char *message, int last_button, int selected_state) 
     LOOP_BEGIN(about_buttons, 0);
         C2D_DrawText(&text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.7, 0.7, TINT_COLOR);
     LOOP_END(about_buttons);
-    return savestate_menu(last_button, selected_state);
+    [[gnu::musttail]] return savestate_menu(last_button, selected_state);
 }
 
 static void savestate_confirm(char *message, int last_button, int selected_state) {
@@ -2262,7 +3176,7 @@ static void savestate_confirm(char *message, int last_button, int selected_state
     LOOP_BEGIN(savestate_confirm_buttons, 0);
         C2D_DrawText(&text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.7, 0.7, TINT_COLOR);
     LOOP_END(savestate_confirm_buttons);
-    if (button) return savestate_menu(last_button, selected_state);
+    if (button) [[gnu::musttail]] return savestate_menu(last_button, selected_state);
     else return;
 }
 
@@ -2294,26 +3208,32 @@ static void savestate_menu(int initial_button, int selected_state) {
     LOOP_END(savestate_buttons);
 
     last_savestate = selected_state;
-    
+
     switch(button) {
         case SAVESTATE_BACK:
-            return main_menu(MAIN_MENU_SAVESTATES);
+            [[gnu::musttail]] return main_menu(MAIN_MENU_SAVESTATES);
         case SAVE_SAVESTATE:
-            return emulation_sstate(selected_state) != 0 ?
-                savestate_error("Could not save state", SAVE_SAVESTATE, selected_state) :
-                savestate_confirm("Save complete!", SAVE_SAVESTATE, selected_state);
+            if (emulation_sstate(selected_state) != 0) {
+                [[gnu::musttail]] return savestate_error("Could not save state", SAVE_SAVESTATE, selected_state);
+            } else {
+                [[gnu::musttail]] return savestate_confirm("Save complete!", SAVE_SAVESTATE, selected_state);
+            }
         case LOAD_SAVESTATE:
-            return emulation_lstate(selected_state) != 0 ?
-                savestate_error("Could not load state", LOAD_SAVESTATE, selected_state) :
-                savestate_confirm("Load complete!", LOAD_SAVESTATE, selected_state);
+            if (emulation_lstate(selected_state) != 0) {
+                [[gnu::musttail]] return savestate_error("Could not load state", LOAD_SAVESTATE, selected_state);
+            } else {
+                [[gnu::musttail]] return savestate_confirm("Load complete!", LOAD_SAVESTATE, selected_state);
+            }
         case DELETE_SAVESTATE:
-            return emulation_rmstate(selected_state) != 0 ?
-                savestate_error("Could not delete state", DELETE_SAVESTATE, selected_state) :
-                savestate_menu(SAVE_SAVESTATE, selected_state);
+            if (emulation_rmstate(selected_state) != 0) {
+                [[gnu::musttail]] return savestate_error("Could not delete state", DELETE_SAVESTATE, selected_state);
+            } else {
+                [[gnu::musttail]] return savestate_menu(SAVE_SAVESTATE, selected_state);
+            }
         case PREV_SAVESTATE:
-            return savestate_menu(PREV_SAVESTATE, selected_state == 0 ? 9 : selected_state - 1);
+            [[gnu::musttail]] return savestate_menu(PREV_SAVESTATE, selected_state == 0 ? 9 : selected_state - 1);
         case NEXT_SAVESTATE:
-            return savestate_menu(NEXT_SAVESTATE, selected_state == 9 ? 0 : selected_state + 1);
+            [[gnu::musttail]] return savestate_menu(NEXT_SAVESTATE, selected_state == 9 ? 0 : selected_state + 1);
     }
 }
 
@@ -2325,15 +3245,17 @@ static void about(void) {
         C2D_DrawSpriteTinted(&logo_sprite, &tint);
         C2D_DrawText(&text_about, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.5, 0.5, TINT_COLOR);
     LOOP_END(about_buttons);
-    return main_menu(MAIN_MENU_ABOUT);
+    [[gnu::musttail]] return options(OPTIONS_ABOUT);
 }
 
-static void load_error(int err, bool unloaded) {
+static bool load_error(int err, bool unloaded, char *rom_message) {
     C2D_Text text;
     char code_message[32];
     snprintf(code_message, sizeof(code_message), "Error code: %d", err);
     C2D_TextParse(&text, dynamic_textbuf, code_message);
     C2D_TextOptimize(&text);
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN false
     LOOP_BEGIN(about_buttons, 0);
         C2D_DrawText(&text_loaderr, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.5, 0.5, TINT_COLOR);
         C2D_DrawText(&text, C2D_AlignCenter | C2D_WithColor, 320 / 2, 120, 0, 0.5, 0.5, TINT_COLOR);
@@ -2341,7 +3263,9 @@ static void load_error(int err, bool unloaded) {
             C2D_DrawText(&text_unloaded, C2D_AlignCenter | C2D_WithColor, 320 / 2, 160, 0, 0.5, 0.5, TINT_COLOR);
         }
     LOOP_END(about_buttons);
-    return rom_loader();
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN
+    [[gnu::musttail]] return rom_loader(rom_message);
 }
 
 static void forwarder_error(int err) {
@@ -2358,12 +3282,17 @@ static void forwarder_error(int err) {
     return;
 }
 
-static void load_rom(void) {
+static bool load_rom(char *rom_message) {
     if (save_thread) threadJoin(save_thread, U64_MAX);
     int ret;
     if ((ret = v810_load_init())) {
         // instant fail
-        return tVBOpt.FORWARDER ? forwarder_error(ret) : load_error(ret, false);
+        if (tVBOpt.FORWARDER) {
+            forwarder_error(ret);
+            return false;
+        } else {
+            [[gnu::musttail]] return load_error(ret, false, rom_message);
+        }
     }
     C2D_Text text;
     C2D_TextBufClear(dynamic_textbuf);
@@ -2375,6 +3304,8 @@ static void load_rom(void) {
 
     if (tVBOpt.FORWARDER) load_rom_buttons[0].hidden = true;
 
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN false
     LOOP_BEGIN(load_rom_buttons, -1);
         ret = v810_load_step();
         if (ret < 0) {
@@ -2391,13 +3322,15 @@ static void load_rom(void) {
             }
         }
     LOOP_END(load_rom_buttons);
+    #undef DEFAULT_RETURN
+    #define DEFAULT_RETURN
     if (tVBOpt.GAME_SETTINGS) loadFileOptions();
     if (ret == 100) {
         // complete
         game_running = true;
         loadGameOptions();
         last_savestate = 0;
-        return;
+        return true;
     } else {
         game_running = false;
         // redraw logo since we unloaded
@@ -2406,11 +3339,16 @@ static void load_rom(void) {
         C3D_FrameEnd(0);
         if (ret < 0) {
             // error
-            return tVBOpt.FORWARDER ? forwarder_error(ret) : load_error(ret, true);
+            if (tVBOpt.FORWARDER) {
+                forwarder_error(ret);
+                return false;
+            } else {
+                [[gnu::musttail]] return load_error(ret, true, rom_message);
+            }
         } else {
             // cancelled
             v810_load_cancel();
-            return rom_loader();
+            [[gnu::musttail]] return rom_loader(rom_message);
         }
     }
 }
@@ -2420,7 +3358,7 @@ static inline int handle_buttons(Button buttons[], int count) {
     int ret = -1;
     touchPosition touch_pos;
     hidTouchRead(&touch_pos);
-    
+
     // d-pad input
     u32 kDown = hidKeysDown();
     if ((kDown & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)) && !buttonLock)
@@ -2640,9 +3578,8 @@ void guiInit(void) {
     C2D_SpriteFromSheet(&splash_right, splash_sheet, splash_splash_right_idx);
     C2D_SpriteSetPos(&splash_right, 0, 256);
 
-    static_textbuf = C2D_TextBufNew(2048);
+    static_textbuf = C2D_TextBufNew(4096);
     dynamic_textbuf = C2D_TextBufNew(4096);
-    SETUP_ALL_BUTTONS
     STATIC_TEXT(&text_A, "A")
     STATIC_TEXT(&text_B, "B")
     STATIC_TEXT(&text_btn_A, "\uE000")
@@ -2675,6 +3612,11 @@ void guiInit(void) {
     STATIC_TEXT(&text_no, "No")
     STATIC_TEXT(&text_areyousure_reset, "Are you sure you want to reset?")
     STATIC_TEXT(&text_areyousure_exit, "Are you sure you want to exit?")
+    STATIC_TEXT(&text_areyousure_leave, "Are you sure you want to\nexit multiplayer?")
+    STATIC_TEXT(&text_version_mismatch, "Your emulator version doesn't\nmatch the host's.\nThis can cause desyncs.")
+    STATIC_TEXT(&text_your_version, "Your version: " VERSION)
+    STATIC_TEXT(&text_connect_anyway, "Connect anyway?")
+    STATIC_TEXT(&text_protocol_mismatch, "Your emulator version doesn't\nmatch the host's.\nPlease ensure both are updated.\nYour version: " VERSION)
     STATIC_TEXT(&text_savestate_menu, "Savestates")
     STATIC_TEXT(&text_save, "Save")
     STATIC_TEXT(&text_load, "Load")
@@ -2688,10 +3630,10 @@ void guiInit(void) {
     STATIC_TEXT(&text_custom_3ds_button_CPAD_DOWN, "\uE077\uE01C")
     STATIC_TEXT(&text_custom_3ds_button_CPAD_LEFT, "\uE077\uE01A")
     STATIC_TEXT(&text_custom_3ds_button_CPAD_RIGHT, "\uE077\uE019")
-    STATIC_TEXT(&text_custom_3ds_button_CSTICK_UP, "\uE04A\uE01B")     
-    STATIC_TEXT(&text_custom_3ds_button_CSTICK_DOWN, "\uE04A\uE01C")     
-    STATIC_TEXT(&text_custom_3ds_button_CSTICK_LEFT, "\uE04A\uE01A")     
-    STATIC_TEXT(&text_custom_3ds_button_CSTICK_RIGHT, "\uE04A\uE019")     
+    STATIC_TEXT(&text_custom_3ds_button_CSTICK_UP, "\uE04A\uE01B")
+    STATIC_TEXT(&text_custom_3ds_button_CSTICK_DOWN, "\uE04A\uE01C")
+    STATIC_TEXT(&text_custom_3ds_button_CSTICK_LEFT, "\uE04A\uE01A")
+    STATIC_TEXT(&text_custom_3ds_button_CSTICK_RIGHT, "\uE04A\uE019")
     STATIC_TEXT(&text_custom_3ds_button_A, "\uE000")
     STATIC_TEXT(&text_custom_3ds_button_X, "\uE002")
     STATIC_TEXT(&text_custom_3ds_button_B, "\uE001")
@@ -2732,25 +3674,19 @@ void guiInit(void) {
     STATIC_TEXT(&text_multicolor, "Multicolor")
     STATIC_TEXT(&text_brighten, "Brighten")
     STATIC_TEXT(&text_brightness_disclaimer, "Actual brightness may vary by game.")
-}
-
-static bool shouldRedrawMenu = true;
-static bool inMenu = false;
-
-void openMenu(void) {
-    inMenu = true;
-    shouldRedrawMenu = true;
-    if (game_running) {
-        sound_pause();
-        save_sram();
-    }
-    C2D_Prepare();
-    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
-    main_menu(game_running ? MAIN_MENU_RESUME : MAIN_MENU_LOAD_ROM);
-    if (guiop == 0) sound_resume();
-    else if (guiop == AKILL) sound_refresh();
-    else if (!(guiop & GUIEXIT)) sound_reset();
-    inMenu = false;
+    STATIC_TEXT(&text_multi_waiting, "Waiting for connection...")
+    STATIC_TEXT(&text_multi_preparing, "Peer is preparing...")
+    STATIC_TEXT(&text_downloading, "Downloading...")
+    STATIC_TEXT(&text_multi_init_error, "Could not start wireless.\nIs wireless enabled?")
+    STATIC_TEXT(&text_multi_disconnect, "Disconnected.")
+    STATIC_TEXT(&text_multi_comm_error, "Communication error.")
+    STATIC_TEXT(&text_multi_reset_on_join, "Game will reset when connecting.")
+    STATIC_TEXT(&text_input_buffer, "Input buffer:")
+    STATIC_TEXT(&text_multi_no_match, "Loaded game does not match.")
+    STATIC_TEXT(&text_multi_not_loaded, "No game is currently loaded.")
+    STATIC_TEXT(&text_dlplay_saving, "Note: Download Play will disable saving.")
+    STATIC_TEXT(&text_forwarder_nomatch, "Forwarders cannot join other games.")
+    SETUP_ALL_BUTTONS
 }
 
 bool backlightEnabled = true;
@@ -2761,6 +3697,59 @@ bool toggleBacklight(bool enable) {
     gspLcdExit();
     return enable;
 }
+
+static bool shouldRedrawMenu = true;
+static bool inMenu = false;
+
+void openMenu(bool my_menu) {
+    bool oldBacklight = backlightEnabled;
+    if (!backlightEnabled) backlightEnabled = toggleBacklight(true);
+    inMenu = true;
+    shouldRedrawMenu = true;
+    if (game_running) {
+        sound_pause();
+        save_sram();
+    }
+    C2D_Prepare();
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+    if (my_menu) {
+        main_menu(game_running ? MAIN_MENU_RESUME : MAIN_MENU_LOAD_ROM);
+    } else {
+        multiplayer_wait_for_peer();
+    }
+    gspWaitForVBlank();
+    if (guiop == 0) sound_resume();
+    else if (guiop == AKILL) sound_refresh();
+    else if (!(guiop & GUIEXIT)) sound_reset();
+    inMenu = false;
+    if (!oldBacklight) {
+        if (my_menu || !is_multiplayer) shouldRedrawMenu = true;
+        else backlightEnabled = toggleBacklight(false);
+    }
+}
+
+void openPeerDisconnectMenu(void) {
+    if (!backlightEnabled) {
+        backlightEnabled = toggleBacklight(true);
+        shouldRedrawMenu = true;
+    }
+    inMenu = true;
+    shouldRedrawMenu = true;
+    if (game_running) {
+        sound_pause();
+        save_sram();
+    }
+    C2D_Prepare();
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
+    multiplayer_error(0, &text_multi_disconnect, false);
+    gspWaitForVBlank();
+    if (guiop == 0) sound_resume();
+    else if (guiop == AKILL) sound_refresh();
+    else if (!(guiop & GUIEXIT)) sound_reset();
+    inMenu = false;
+}
+
+static bool vsync_enabled = false;
 
 void toggleVsync(bool enable) {
     // setup the thread
@@ -2777,27 +3766,27 @@ void toggleVsync(bool enable) {
         startPeriodic(frame_pacer_thread, 20000000, false);
     }
     // update VTotal only when necessary
-    static bool old_enable = false;
-    if (enable == old_enable) return;
-    old_enable = enable;
+    if (enable == vsync_enabled) return;
+    vsync_enabled = enable;
     gspWaitForVBlank();
     GSPGPU_WriteHWRegs(0x400424, &vtotal_top, 4);
     GSPGPU_WriteHWRegs(0x400524, &vtotal_bottom, 4);
 }
 
-void toggleAnaglyph(bool enable, bool also_update_vsync) {
+void toggleAnaglyph(bool enable) {
+    bool old_vsync = vsync_enabled;
+    // updating 3d mode resets VTotal, so turn off VSync in advance to fix the cache
+    if (old_vsync) toggleVsync(false);
     tVBOpt.ANAGLYPH = enable;
     gfxSet3D(!enable);
-    if (!also_update_vsync) return;
-    // updating 3d mode resets VTotal, so turn off VSync in advance to fix the cache
-    toggleVsync(false);
+    if (!old_vsync) return;
     // push 1 frame and wait for VBlank to reset VTotal
     C3D_FrameBegin(0);
     video_flush(true);
     C3D_FrameEnd(0);
     gspWaitForVBlank();
     // re-enable VSync if applicable
-    toggleVsync(tVBOpt.VSYNC);
+    toggleVsync(old_vsync);
 }
 
 void aptBacklight(APT_HookType hook, void* param) {
@@ -2852,7 +3841,7 @@ static void save_debug_info(void) {
     LOOP_BEGIN(about_buttons, 0);
         C2D_DrawText(&text_debug_filenames, C2D_AlignCenter | C2D_WithColor, 320 / 2, 80, 0, 0.7, 0.7, TINT_COLOR);
     LOOP_END(about_buttons);
-    return options(OPTIONS_DEBUG);
+    [[gnu::musttail]] return options(OPTIONS_DEBUG);
 }
 
 void showError(int code) {
@@ -3075,20 +4064,22 @@ void guiUpdate(float total_time, float drc_time) {
         shouldRedrawMenu = false;
         C2D_TargetClear(screen, 0);
         drawTouchControls(0);
-        // fastforward icon
-        if (tVBOpt.FASTFORWARD) C2D_DrawRectSolid(0, 240-32, 0, 32, 32, C2D_Color32(32, 32, 32, 255));
         int col_line = C2D_Color32(64, 64, 64, 255);
-        C2D_DrawLine(0, 240-32, col_line, 31.5, 240-32, col_line, 1, 0);
-        C2D_DrawLine(31.5, 240-32, col_line, 31.5, 240, col_line, 1, 0);
-        int t1l = 8 - 5 * !tVBOpt.PERF_INFO;
-        int t1r = 15 - !tVBOpt.PERF_INFO;
-        int t2l = 18 - !tVBOpt.PERF_INFO;
-        int t2r = 25 + 3 * !tVBOpt.PERF_INFO;
-        int tu = 240-28;
-        int tm = 240-22 + 6 * !tVBOpt.PERF_INFO;
-        int tb = 240-16 + 12 * !tVBOpt.PERF_INFO;
-        C2D_DrawTriangle(t1l, tu, col_line, t1l, tb, col_line, t1r, tm, col_line, 0);
-        C2D_DrawTriangle(t2l, tu, col_line, t2l, tb, col_line, t2r, tm, col_line, 0);
+        if (!is_multiplayer) {
+            // fastforward icon
+            if (tVBOpt.FASTFORWARD) C2D_DrawRectSolid(0, 240-32, 0, 32, 32, C2D_Color32(32, 32, 32, 255));
+            C2D_DrawLine(0, 240-32, col_line, 31.5, 240-32, col_line, 1, 0);
+            C2D_DrawLine(31.5, 240-32, col_line, 31.5, 240, col_line, 1, 0);
+            int t1l = 8 - 5 * !tVBOpt.PERF_INFO;
+            int t1r = 15 - !tVBOpt.PERF_INFO;
+            int t2l = 18 - !tVBOpt.PERF_INFO;
+            int t2r = 25 + 3 * !tVBOpt.PERF_INFO;
+            int tu = 240-28;
+            int tm = 240-22 + 6 * !tVBOpt.PERF_INFO;
+            int tb = 240-16 + 12 * !tVBOpt.PERF_INFO;
+            C2D_DrawTriangle(t1l, tu, col_line, t1l, tb, col_line, t1r, tm, col_line, 0);
+            C2D_DrawTriangle(t2l, tu, col_line, t2l, tb, col_line, t2r, tm, col_line, 0);
+        }
         if (!old_2ds) {
             // backlight icon
             int col_top = TINT_50;
@@ -3108,7 +4099,7 @@ void guiUpdate(float total_time, float drc_time) {
             C2D_DrawRectSolid(13, 25, 0, 6, 2, col_line);
         }
     }
-    
+
     draw_status_bar(total_time, drc_time);
 
     if (save_thread) C2D_DrawText(&text_saving, C2D_AlignLeft, 0, 224, 0, 0.5, 0.5);
@@ -3167,13 +4158,17 @@ void guiUpdate(float total_time, float drc_time) {
 
     C2D_Flush();
 
-    C3D_ColorLogicOp(GPU_LOGICOP_COPY);
+    gpu_blend_default();
 }
 
 bool guiShouldPause(void) {
     touchPosition touch_pos;
     hidTouchRead(&touch_pos);
-    return (touch_pos.px < tVBOpt.PAUSE_RIGHT && (touch_pos.px >= 32 || (touch_pos.py > (old_2ds ? 0 : 32) && touch_pos.py < 240-32))) && backlightEnabled;
+    return (touch_pos.px < tVBOpt.PAUSE_RIGHT && (
+        touch_pos.px >= 32 || (
+            (old_2ds || touch_pos.py > 32) && // backlight
+            (is_multiplayer || touch_pos.py < 240-32)) // fastforward
+        )) && backlightEnabled;
 }
 
 int guiGetInput(bool ingame) {
@@ -3185,11 +4180,13 @@ int guiGetInput(bool ingame) {
             return 0;
         }
         if (ingame) {
-            if (touch_pos.px < 32 && touch_pos.py >= 240-32) {
-                if ((tVBOpt.FF_TOGGLE ? hidKeysDown() : hidKeysHeld()) & KEY_TOUCH) {
-                    tVBOpt.FASTFORWARD = !tVBOpt.FASTFORWARD;
+            if (!is_multiplayer) {
+                if (touch_pos.px < 32 && touch_pos.py >= 240-32) {
+                    if ((tVBOpt.FF_TOGGLE ? hidKeysDown() : hidKeysHeld()) & KEY_TOUCH) {
+                        tVBOpt.FASTFORWARD = !tVBOpt.FASTFORWARD;
+                    }
+                    return 0;
                 }
-                return 0;
             }
             if (hidKeysDown() & KEY_TOUCH && (touch_pos.px <= 32 && touch_pos.py <= 32) && !old_2ds) {
                 backlightEnabled = toggleBacklight(false);

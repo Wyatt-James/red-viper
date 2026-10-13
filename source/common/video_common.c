@@ -1,26 +1,71 @@
 
+#include <math.h>
+
 #include "vb_dsp.h"
 #include "v810_mem.h"
+#include "vb_set.h"
 
 bool tileVisible[2048];
 int blankTile;
+
+#define BRIGHTNESS_FACTOR 1.75
+#define GAMMA 0.9
+
+static u8 brightness_lut[256];
+
+static inline u8 clamp255(int x) {
+	return x < 255 ? x : 255;
+}
+
+void setup_brightness_lut(void) {
+	for (int i = 0; i < 256; i++) {
+		brightness_lut[i] = clamp255(pow(((float)i) * BRIGHTNESS_FACTOR / 255, GAMMA) * 255);
+	}
+}
+
+int video_get_colour(int id, int brt_reg) {
+	if (id == 0) {
+		return tVBOpt.MULTICOL && !tVBOpt.ANAGLYPH ? tVBOpt.MTINT[tVBOpt.MULTIID][0] : 0;
+	}
+	int brightness = clamp255(brightness_lut[clamp255(brt_reg)] * (tVBOpt.MULTICOL && !tVBOpt.ANAGLYPH ? tVBOpt.STINT[tVBOpt.MULTIID][id - 1] : 1));
+	int fulltint = tVBOpt.ANAGLYPH ? 0xffffff : tVBOpt.MULTICOL ? tVBOpt.MTINT[tVBOpt.MULTIID][id] : tVBOpt.TINT;
+	int col_tint =
+		((brightness * ((fulltint) & 0xff) / 255)) |
+		((brightness * ((fulltint >> 8) & 0xff) / 255) << 8) |
+		((brightness * ((fulltint >> 16) & 0xff) / 255) << 16);
+	if (tVBOpt.ANAGLYPH || !tVBOpt.MULTICOL) return col_tint;
+
+	int black_brightness = 255 - brightness;
+	int black_tint = tVBOpt.ANAGLYPH ? 0 :
+		((black_brightness * ((tVBOpt.MTINT[tVBOpt.MULTIID][0]) & 0xff) / 255)) |
+		((black_brightness * ((tVBOpt.MTINT[tVBOpt.MULTIID][0] >> 8) & 0xff) / 255) << 8) |
+		((black_brightness * ((tVBOpt.MTINT[tVBOpt.MULTIID][0] >> 16) & 0xff) / 255) << 16);
+
+	#if DRC_AVAILABLE
+	return __builtin_arm_uqadd8(col_tint, black_tint);
+	#else
+	return ((col_tint + black_tint) & 0xff)
+		| (((col_tint & ~0xff) + (black_tint & ~0xff)) & 0xff00)
+		| (((col_tint & ~0xffff) + (black_tint & ~0xffff)) & 0xff0000)
+		| (((col_tint & ~0xffffff) + (black_tint & ~0xffffff)) & 0xff000000);
+	#endif
+}
 
 int videoProcessingTime(void) {
 	int time = 54688;
 	WORLD *worlds = (WORLD*)(vb_state->V810_DISPLAY_RAM.off + 0x3d800);
 	int object_group_id = 3;
 	for (int wrld = 31; wrld >= 0; wrld--) {
-		if (worlds[wrld].head & 0x40) {
-			// END
+		if (worlds[wrld].end) {
 			time += 308;
 			break;
 		}
-		if ((worlds[wrld].head & 0xc000) == 0) {
+		if (worlds[wrld].on == 0) {
 			// dummy world
 			time += 561;
 			continue;
 		}
-		if ((worlds[wrld].head & 0x3000) != 0x3000) {
+		if (worlds[wrld].bgm != 3) {
 			// background world
 			int w = (worlds[wrld].w & 0x1fff) + 1;
 			int h = worlds[wrld].h + 1;
@@ -31,8 +76,8 @@ int videoProcessingTime(void) {
 
 			if (gy > 0) time += (gy < 28 ? gy : 28) * 5;
 
-			switch (worlds[wrld].head & 0x3000) {
-				case 0x0000: {
+			switch (worlds[wrld].bgm) {
+				case 0: {
 					// normal world
 					time += 880;
 					int wstart = mx - abs(mp);
@@ -69,7 +114,7 @@ int videoProcessingTime(void) {
 					}
 					break;
 				}
-				case 0x1000: {
+				case 1: {
 					// h-bias world
 					s16 *params = (s16 *)(vb_state->V810_DISPLAY_RAM.off + 0x20000 + worlds[wrld].param * 2);
 					time += 880;
@@ -104,7 +149,7 @@ int videoProcessingTime(void) {
 					}
 					break;
 				}
-				case 0x2000: {
+				case 2: {
 					// affine world
 					time += 908;
 					for (int y = 0; y < 224; y += 8) {
@@ -157,6 +202,15 @@ int videoProcessingTime(void) {
 			} while (i = (i - 1) & 1023, i != start_index);
 		}
 	}
+	// The title screen animation in Zero Racers has two fullscreen affine layers,
+	// which in theory takes just 4141 cycles under 2 display frames.
+	// However, based on hardware recordings, it clearly takes 3 full frames.
+	// It's not currently clear what pushes it over the threshold.
+	// Therefore, we bump render time up a little so that it matches.
+	// If it takes just under 3 frames, screen tearing occurs.
+	if (CHECK_GAMEID("01VZRE") && time > 700000) {
+	    time += 5000;
+	}
 	return time;
 }
 
@@ -166,10 +220,13 @@ void clearCache(void) {
     tDSPCACHE.BgmPALMod = 1;                // World Palette Changed
     tDSPCACHE.ObjPALMod = 1;                // Obj Palette Changed
     tDSPCACHE.BrtPALMod = 1;                // Britness for Palette Changed
+    #ifdef NEED_OBJ_DATA_CACHE
     tDSPCACHE.ObjDataCacheInvalid = 1;      // Object Cache Is invalid
+    #endif
     tDSPCACHE.ObjCacheInvalid = 1;          // Object Cache Is invalid
-    for(i = 0; i < 14; i++)
-        tDSPCACHE.BGCacheInvalid[i] = 1;    // Object Cache Is invalid
+    #ifdef NEED_BG_CACHE
+    tDSPCACHE.BGCacheInvalid = -1;
+    #endif
     for (i = 0; i < 2; i++) {
 		tDSPCACHE.DDSPDataState[i] = CPU_WROTE; // Direct Screen Draw changed
 		for (int j = 0; j < 64; j++) {

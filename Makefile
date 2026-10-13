@@ -1,6 +1,6 @@
 VERSION_MAJOR := 1
-VERSION_MINOR := 1
-VERSION_MICRO := 0
+VERSION_MINOR := 3
+VERSION_MICRO := 4
 VERSION := v${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_MICRO}
 
 #---------------------------------------------------------------------------------
@@ -66,7 +66,7 @@ ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 GIT_HASH := $(shell git log -1 --pretty=format:"%h")
 FULL_VERSION := "$(VERSION) - $(GIT_HASH)"
 
-CFLAGS	:=	-g -Wall -Wno-format-truncation -Werror -O2 -mword-relocations \
+CFLAGS	:=	-g -Wall -Wno-format-truncation -Werror -O3 -mword-relocations -Wswitch \
 			-Wno-unused-variable \
 			-ffunction-sections \
 			-DVERSION=\"$(FULL_VERSION)\" \

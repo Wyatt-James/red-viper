@@ -59,7 +59,7 @@ static void save_sram_thread(void *sram) {
         printf("\nError opening sram.bin");
         return;
     }
-    fwrite(sram, 1, vb_state->V810_GAME_RAM.highaddr + 1 - vb_state->V810_GAME_RAM.lowaddr, nvramf);
+    fwrite(sram, 1, vb_players[my_player_id].V810_GAME_RAM.size, nvramf);
     fclose(nvramf);
 
     free(sram);
@@ -70,10 +70,13 @@ static void save_sram_thread(void *sram) {
 void save_sram(void) {
     // Do not save sram if it's not required!
     if (!is_sram) return;
+    // Don't save if there is no save path
+    if (tVBOpt.RAM_PATH[0] == 0) return;
     // Don't save if we're already saving
     if (save_thread) return;
-    void *sram_copy = malloc(vb_state->V810_GAME_RAM.highaddr + 1 - vb_state->V810_GAME_RAM.lowaddr);
-    memcpy(sram_copy, vb_state->V810_GAME_RAM.pmemory, vb_state->V810_GAME_RAM.highaddr + 1 - vb_state->V810_GAME_RAM.lowaddr);
+    V810_MEMORYFETCH *sram = &vb_players[my_player_id].V810_GAME_RAM;
+    void *sram_copy = malloc(sram->size);
+    memcpy(sram_copy, sram->pmemory, sram->size);
 #ifdef __3DS__
     // Saving on the same thread is slow, but saving in another thread happens instantly
     save_thread = threadCreate(save_sram_thread, sram_copy, 4000, 0x18, 1, true);
@@ -117,8 +120,6 @@ char * get_savestate_path(int state, bool write) {
     free(sspath);
     return NULL;
 }
-
-#ifdef __3DS__
 
 bool emulation_hasstate(int state) {
     char *sspath = get_savestate_path(state, false);
@@ -246,7 +247,7 @@ int emulation_lstate(int state) {
     //Load VIP registers
     V810_VIPREGDAT new_vipreg = {0};
     READ_VAR(size);
-    
+
     if (ver < 2) {
         if (size == 64) {
             // support <=0.9.6 savestates
@@ -265,8 +266,16 @@ int emulation_lstate(int state) {
             READ_VAR(new_vipreg.tDisplayedFB);
             READ_VAR(new_vipreg.tFrame);
             READ_VAR(new_vipreg.SPT);
-            READ_VAR(new_vipreg.GPLT);
-            READ_VAR(new_vipreg.JPLT);
+            HWORD gplt[4];
+            READ_VAR(gplt);
+            for (int i = 0; i < 4; i++) {
+                new_vipreg.GPLT[i] = gplt[i];
+            }
+            HWORD jplt[4];
+            READ_VAR(jplt);
+            for (int i = 0; i < 4; i++) {
+                new_vipreg.JPLT[i] = jplt[i];
+            }
             READ_VAR(new_vipreg.BKCOL);
             u16 padding;
             READ_VAR(padding);
@@ -296,9 +305,19 @@ int emulation_lstate(int state) {
             READ_VAR(new_vipreg.tDisplayedFB);
             READ_VAR(new_vipreg.tFrame);
             READ_VAR(new_vipreg.SPT);
-            READ_VAR(new_vipreg.GPLT);
-            READ_VAR(new_vipreg.JPLT);
+            HWORD gplt[4];
+            READ_VAR(gplt);
+            for (int i = 0; i < 4; i++) {
+                new_vipreg.GPLT[i] = gplt[i];
+            }
+            HWORD jplt[4];
+            READ_VAR(jplt);
+            for (int i = 0; i < 4; i++) {
+                new_vipreg.JPLT[i] = jplt[i];
+            }
             READ_VAR(new_vipreg.BKCOL);
+            u16 padding;
+            READ_VAR(padding);
             READ_VAR(new_vipreg.frametime);
             READ_VAR(new_vipreg.lastdisp);
             READ_VAR(new_vipreg.rowcount);
@@ -334,6 +353,8 @@ int emulation_lstate(int state) {
                 new_vipreg.JPLT[i] = jplt[i];
             }
             READ_VAR(new_vipreg.BKCOL);
+            u16 padding;
+            READ_VAR(padding);
             READ_VAR(new_vipreg.frametime);
             READ_VAR(new_vipreg.lastdisp);
             READ_VAR(new_vipreg.lastdraw);
@@ -386,8 +407,13 @@ int emulation_lstate(int state) {
         READ_VAR(new_hreg.CCSR);
         READ_VAR(new_hreg.CCR);
         READ_VAR(new_hreg.hwRead);
+        new_hreg.CCR = 0x69;
+        new_hreg.CCSR = 0xFA;
     } else if (size == 32) {
+        // support <=v1.0.2 states
         FREAD(&new_hreg, 1, 32, state_file);
+        new_hreg.CCR = 0x69;
+        new_hreg.CCSR = 0xFA;
     } else if (size == sizeof(new_hreg)) {
         static_assert(sizeof(new_hreg) == 40, "HReg changed size");
         READ_VAR(new_hreg);
@@ -457,11 +483,13 @@ int emulation_lstate(int state) {
         }
     }
 
+    #ifdef __3DS__
     clearCache();
     C3D_FrameBegin(0);
     video_render((vb_state->tVIPREG.tDisplayedFB) % 2, false);
     C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA);
     C3D_FrameEnd(0);
+    #endif
 
     guiop = AKILL;
     return 0;
@@ -470,4 +498,3 @@ int emulation_lstate(int state) {
     fclose(state_file);
     return 1;
 }
-#endif

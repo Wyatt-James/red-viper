@@ -5,19 +5,19 @@
  * (the V810 instruction decoding) is based on Reality Boy's interpreter and
  * was written by David Tucker. For more information on the original license,
  * check the README.
- * 
+ *
  * Copyright (c) 2015 danielps
- * 
+ *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
  * in the Software without restriction, including without limitation the rights
  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
  * copies of the Software, and to permit persons to whom the Software is
  * furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice shall be included in all
  * copies or substantial portions of the Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
@@ -37,6 +37,7 @@
 #ifdef __3DS__
 #include <3ds.h>
 #include <citro3d.h>
+#include "video_hard.h"
 #endif
 
 #include "utils.h"
@@ -111,7 +112,7 @@ static BYTE drc_getPhysReg(BYTE vb_reg, WORD reg_map) {
 static bool is_byte_getter(WORD start_PC) {
     static BYTE byte_getter_func[] = {
         0x46, 0xc1, 0x00, 0x00, // ld.b [r6], r10
-        0x1f, 0x18,             // jmp  [lp] 
+        0x1f, 0x18,             // jmp  [lp]
     };
     BYTE* dest = (BYTE*)V810_ROM1.off + start_PC;
     return !memcmp(dest, byte_getter_func, sizeof(byte_getter_func));
@@ -120,7 +121,7 @@ static bool is_byte_getter(WORD start_PC) {
 static bool is_hword_getter(WORD start_PC) {
     static BYTE hword_getter_func[] = {
         0x46, 0xc5, 0x00, 0x00, // ld.h [r6], r10
-        0x1f, 0x18,             // jmp  [lp] 
+        0x1f, 0x18,             // jmp  [lp]
     };
     static BYTE hword_getter_jr_func[] = {
         0x46, 0xc5, 0x00, 0x00, // ld.h [r6], r10
@@ -221,7 +222,7 @@ static void drc_scanBlockBounds(WORD* p_start_PC, WORD* p_end_PC) {
                             }
                         }
                     }
-                    
+
                     potentiallyDone = true;
                     break;
                 }
@@ -256,7 +257,7 @@ static void drc_scanBlockBounds(WORD* p_start_PC, WORD* p_end_PC) {
                 } else if (branch_addr > end_PC) {
                     end_PC = branch_addr;
                 }
-                
+
                 if (opcode == V810_OP_BR) {
                     potentiallyDone = true;
                 }
@@ -367,13 +368,117 @@ void drc_clearScreenForGolf(void) {
 #endif
 }
 
+// Baseball 2 unpacked sprite cache. Not strictly required for performance,
+// but since we're HLE'ing this anyway, might as well.
+#define BASEBALL2_SPRITES_COUNT 512
+static bool baseball2_sprites_is_unpacked[BASEBALL2_SPRITES_COUNT];
+static WORD baseball2_sprites_address[BASEBALL2_SPRITES_COUNT];
+static BYTE baseball2_sprites_unpacked[BASEBALL2_SPRITES_COUNT][32][32];
+
+void baseball2_scaling(WORD in_img, WORD out_img, WORD scale_fixed) {
+    // The input/output format is 4x4 tiles
+    void *in_ptr = (void*)(V810_ROM1.off + in_img);
+    void *out_ptr = (void*)(vb_state->V810_VB_RAM.off + out_img);
+
+    // Get cached sprite if possible
+    unsigned sprite_id = (in_img >> 8) % BASEBALL2_SPRITES_COUNT;
+    BYTE (*in_unpacked)[32] = baseball2_sprites_unpacked[sprite_id];
+    bool is_unpacked = baseball2_sprites_is_unpacked[sprite_id] && baseball2_sprites_address[sprite_id] == in_img;
+    if (!is_unpacked) {
+        // Cached doesn't exist, so unpack input image
+        baseball2_sprites_is_unpacked[sprite_id] = true;
+        baseball2_sprites_address[sprite_id] = in_img;
+        for (int ty = 0; ty < 4; ty++) {
+            for (int tx = 0; tx < 4; tx++) {
+                for (int y = 0; y < 8; y++) {
+                    HWORD row = ((HWORD*)in_ptr)[ty*8*4+tx*8+y];
+                    for (int x = 0; x < 8; x++) {
+                        in_unpacked[ty*8+y][tx*8+x] = (row >> (x*2)) & 3;
+                    }
+                }
+            }
+        }
+    }
+
+    // Pre-compute x offsets
+    int xcount = 32;
+    BYTE x_offsets[32];
+    for (int i = 0; i < 32; i++) {
+        unsigned x_offset = (i * scale_fixed) >> 16;
+        if (x_offset >= 32) {
+            xcount = i;
+            break;
+        }
+        x_offsets[i] = x_offset;
+    }
+
+    // Scale
+    static BYTE out_unpacked[32][32];
+    memset(out_unpacked, 0, sizeof(out_unpacked));
+    for (
+        unsigned y = 0, scaled_y_fp = 0, scaled_y = 0;
+        y < 32 && scaled_y < 32;
+        y++, scaled_y_fp += scale_fixed, scaled_y = scaled_y_fp >> 16
+    ) {
+        unsigned scaled_y = scaled_y_fp >> 16;
+        for (unsigned x = 0; x < xcount; x++) {
+            unsigned scaled_x = x_offsets[x];
+            out_unpacked[y][x] = in_unpacked[scaled_y][scaled_x];
+        }
+    }
+
+    // Re-pack into output
+    for (int ty = 0; ty < 4; ty++) {
+        for (int tx = 0; tx < 4; tx++) {
+            for (int y = 0; y < 8; y++) {
+                HWORD row = 0;
+                for (int x = 0; x < 8; x++) {
+                    row |= out_unpacked[ty*8+y][tx*8+x] << (x*2);
+                }
+                ((HWORD*)out_ptr)[ty*8*4+tx*8+y] = row;
+            }
+        }
+    }
+}
+
+void baseball2_sort(void) {
+    u8 ids[19];
+    typedef struct {
+        WORD padding1;
+        HWORD key;
+        HWORD padding2[13];
+    } SortableItem;
+    SortableItem *out = (SortableItem*)(vb_state->V810_VB_RAM.pmemory + 0x93a0);
+    SortableItem originals[sizeof(ids)];
+    memcpy(originals, out, sizeof(originals));
+    for (int i = 0; i < sizeof(ids); i++) ids[i] = i;
+    // insertion sort
+    for (int i = 1; i < sizeof(ids); i++) {
+        u8 x = ids[i];
+        u8 key = originals[x].key;
+        int j;
+        for (j = i; j > 0 && originals[ids[j - 1]].key > key; j--) {
+            ids[j] = ids[j - 1];
+        }
+        ids[j] = x;
+    }
+    for (int i = 0; i < sizeof(ids); i++) {
+        if (i != ids[i]) memcpy(&out[i], &originals[ids[i]], sizeof(out[i]));
+    }
+}
+
 // Workaround for an issue where the CPSR is modified outside of the block
 // before a conditional branch.
 // Sets save_flags for all unconditional instructions prior to a branch.
 static void drc_findLastConditionalInst(int pos) {
     bool save_flags = true, busywait = inst_cache[pos].branch_offset <= 0 && inst_cache[pos].opcode != V810_OP_SETF;
-    int i;
-    for (i = pos - 1; i >= 0; i--) {
+    if (inst_cache[pos].branch_offset == 0) {
+        // catch edge case of block that starts with branch to self
+        dprintf(0, "busywait at %lx to %lx\n", inst_cache[pos].PC, inst_cache[pos].PC + inst_cache[pos].branch_offset);
+        inst_cache[pos].busywait = true;
+        busywait = false;
+    }
+    for (int i = pos - 1; i >= 0; i--) {
         switch (inst_cache[i].opcode) {
             case V810_OP_LD_W:
             case V810_OP_IN_W:
@@ -409,10 +514,14 @@ static void drc_findLastConditionalInst(int pos) {
             case V810_OP_JAL:
                 // nester's funky bowling calls a function to do its busywait read
                 // and it does this several times
-                if (memcmp(tVBOpt.GAME_ID, "01VNFE", 6) == 0 && (
+                if (CHECK_GAMEID("01VNFE") && (
                     inst_cache[i].PC + inst_cache[i].branch_offset == 0x07005326 ||
                     inst_cache[i].PC + inst_cache[i].branch_offset == 0x07001f2c
                 )) break;
+                // zero racers calls a function to do its busywait read
+                if (CHECK_GAMEID("01VZRE") && inst_cache[i].PC + inst_cache[i].branch_offset == 0x07013754) {
+                    break;
+                }
             case V810_OP_ADD:
             case V810_OP_OR:
                 // only certain operators are ok for busywait here, otherwise fallthrough
@@ -423,17 +532,64 @@ static void drc_findLastConditionalInst(int pos) {
                     save_flags = false;
                     break;
                 }
-            default:
-                if (busywait && inst_cache[i].PC < inst_cache[pos].PC + inst_cache[pos].branch_offset) {
-                    dprintf(1, "busywait at %lx to %lx\n", inst_cache[pos].PC, inst_cache[pos].PC + inst_cache[pos].branch_offset);
+            case V810_OP_SHR_I:
+                // virtual league baseball 2 uses a shr in busywaits in several places
+                if (i == pos - 1 && i >= 2
+                    && inst_cache[i - 2].opcode == V810_OP_MOVHI
+                    && inst_cache[i - 2].reg1 == 0
+                    && inst_cache[i - 1].opcode == V810_OP_LD_H
+                    && inst_cache[i - 1].reg1 == inst_cache[i - 2].reg2
+                    && inst_cache[i].opcode == V810_OP_SHR_I
+                    && inst_cache[i].reg2 == inst_cache[i - 1].reg2
+                    && inst_cache[pos].PC + inst_cache[pos].branch_offset == inst_cache[i - 2].PC
+                ) {
+                    save_flags = false;
+                    break;
+                }
+                // dragon hopper uses a shr in busywaits too sometimes
+                if (i == pos - 1 && i >= 1
+                    && inst_cache[i - 1].opcode == V810_OP_LD_B
+                    && inst_cache[i - 1].reg1 != inst_cache[i - 1].reg2
+                    && inst_cache[i].opcode == V810_OP_SHR_I
+                    && inst_cache[i].reg2 == inst_cache[i - 1].reg2
+                    && inst_cache[pos].PC + inst_cache[pos].branch_offset == inst_cache[i - 1].PC
+                ) {
+                    save_flags = false;
+                    break;
+                }
+            case V810_OP_SAR_I:
+                // zero racers uses complex shifting in multiple busywaits
+                if (CHECK_GAMEID("01VZRE")
+                    && i >= 5
+                    && (i == pos - 2 || i == pos - 3)
+                    && inst_cache[i - 5].opcode == V810_OP_LD_H
+                    && inst_cache[i - 4].opcode == V810_OP_ANDI
+                    && inst_cache[i - 4].imm == 0xc
+                    && inst_cache[i - 4].reg1 == inst_cache[i - 5].reg2
+                    && inst_cache[i - 3].opcode == V810_OP_SAR_I
+                    && inst_cache[i - 3].imm == 2
+                    && inst_cache[i - 3].reg2 == inst_cache[i - 4].reg2
+                    && inst_cache[i - 2].opcode == V810_OP_MOV
+                    && inst_cache[i - 2].reg1 == inst_cache[i - 3].reg2
+                    && inst_cache[i - 1].opcode == V810_OP_SHL_I
+                    && inst_cache[i - 1].imm == 0x10
+                    && inst_cache[i - 1].reg2 == inst_cache[i - 2].reg2
+                    && inst_cache[i - 0].opcode == V810_OP_SAR_I
+                    && inst_cache[i - 0].imm == 0x10
+                    && inst_cache[i - 0].reg2 == inst_cache[i - 1].reg2
+                    && inst_cache[pos].PC + inst_cache[pos].branch_offset == inst_cache[i - 5].PC
+                ) {
+                    dprintf(0, "busywait at %lx to %lx\n", inst_cache[pos].PC, inst_cache[pos].PC + inst_cache[pos].branch_offset);
                     inst_cache[pos].busywait = true;
                 }
+            default:
                 return;
         }
-    }
-    if (busywait && inst_cache[0].PC <= inst_cache[pos].PC + inst_cache[pos].branch_offset) {
-        dprintf(1, "busywait at %lx to %lx\n", inst_cache[pos].PC, inst_cache[pos].PC + inst_cache[pos].branch_offset);
-        inst_cache[pos].busywait = true;
+        if (busywait && inst_cache[i].PC <= inst_cache[pos].PC + inst_cache[pos].branch_offset) {
+            dprintf(0, "busywait at %lx to %lx\n", inst_cache[pos].PC, inst_cache[pos].PC + inst_cache[pos].branch_offset);
+            inst_cache[pos].busywait = true;
+            busywait = false;
+        }
     }
 }
 
@@ -455,6 +611,10 @@ static unsigned int drc_decodeInstructions(exec_block *block, WORD start_PC, WOR
         highB  = ((BYTE *)(V810_ROM1.off + cur_PC))[1];
         lowB2  = ((BYTE *)(V810_ROM1.off + cur_PC))[2];
         highB2 = ((BYTE *)(V810_ROM1.off + cur_PC))[3];
+
+        if (cur_PC == 0x07004e1a) {
+            dprintf(0, "iaupsdfhjasdjklfhasdlf %lx", cur_PC);
+        }
 
         inst_cache[i].PC = cur_PC;
         inst_cache[i].save_flags = false;
@@ -514,7 +674,7 @@ static unsigned int drc_decodeInstructions(exec_block *block, WORD start_PC, WOR
                 // inlining
                 static BYTE hword_getter_func[] = {
                     0x46, 0xc5, 0x00, 0x00, // ld.h [r6], r10
-                    0x1f, 0x18,             // jmp  [lp] 
+                    0x1f, 0x18,             // jmp  [lp]
                 };
                 static BYTE hword_getter_jr_func[] = {
                     0x46, 0xc5, 0x00, 0x00, // ld.h [r6], r10
@@ -594,9 +754,8 @@ static unsigned int drc_decodeInstructions(exec_block *block, WORD start_PC, WOR
                 cur_PC += 2;
                 break;
         }
-        
+
         cur_PC += am_size_table[optable[inst_cache[i].opcode].addr_mode];
-        block->cycles += opcycle[inst_cache[i].opcode];
 
         while (!drc_isCode(cur_PC) && cur_PC < end_PC) {
             cur_PC += 2;
@@ -654,31 +813,31 @@ static int drc_translateBlock(void) {
     bool reg2_modified;
     // The value of inst_ptr at the start of a V810 instruction
     arm_inst* inst_ptr_start;
-    
+
     // Games with specific hacks; additional explanation follows where each check is used.
-    bool is_waterworld = memcmp(tVBOpt.GAME_ID, "67VWEE", 6) == 0;
-    bool is_virtual_lab = memcmp(tVBOpt.GAME_ID, "AHVJVJ", 6) == 0;
-    bool is_golf_us = memcmp(tVBOpt.GAME_ID, "01VVGE", 6) == 0;
-    bool is_golf_jp = memcmp(tVBOpt.GAME_ID, "E4VVGJ", 6) == 0;
-    bool is_space_invaders = memcmp(tVBOpt.GAME_ID, "C0VSPJ", 6) == 0;
-    bool is_jack_bros = memcmp(tVBOpt.GAME_ID, "EBVJBE", 6) == 0 || memcmp(tVBOpt.GAME_ID, "EBVJBJ", 6) == 0;
+    bool is_waterworld = CHECK_GAMEID("67VWEE");
+    bool is_virtual_lab = CHECK_GAMEID("AHVJVJ");
+    bool is_golf_us = CHECK_GAMEID("01VVGE");
+    bool is_golf_jp = CHECK_GAMEID("E4VVGJ");
+    bool is_baseball_2 = CHECK_GAMEID("7FVVQE") && V810_ROM1.size >= 0x100000; // size check for memory safety
+    bool is_space_invaders = CHECK_GAMEID("C0VSPJ");
+    bool is_jack_bros = CHECK_GAMEID("EBVJBE") || CHECK_GAMEID("EBVJBJ");
     bool chcw_load_seen = (vb_state->v810_state.S_REG[CHCW] & 2) != 0;
-    bool is_marios_tennis_multiplayer = memcmp(tVBOpt.GAME_ID, "01VMTJ", 6) == 0 &&
+    bool is_marios_tennis_multiplayer = CHECK_GAMEID("01VMTJ") &&
         memcmp((u8*)V810_ROM1.pmemory + (0x1FFDB0 & V810_ROM1.highaddr), "MULTIPLAYER HACK V0.1 BY MARTIN KUJACZYNSKI ", 44) == 0;
 
     // Virtual Bowling and Niko-Chan Battle need their interrupts to run a little slower
     // in order for the samples to play at the right speed.
-    bool is_virtual_bowling = memcmp(tVBOpt.GAME_ID, "E7VVBJ", 6) == 0;
-    bool is_niko_chan = memcmp(tVBOpt.GAME_ID, "8BVTRJ", 6) == 0;
+    bool is_virtual_bowling = CHECK_GAMEID("E7VVBJ");
+    bool is_niko_chan = CHECK_GAMEID("8BVTRJ");
     bool slow_memory = is_virtual_bowling || is_niko_chan ||
-        // Jack Bros. occasionally flashes during level transitions if it runs too fast.
-        // Might no longer be necessary once display/render time is fixed?
-        is_jack_bros ||
         // If memory is too fast, Blox 2's intro jingle doesn't finish.
-        memcmp(tVBOpt.GAME_ID, "CRVB2M", 6) == 0;
+        CHECK_GAMEID("CRVB2M") ||
+        // Artificially slow down Test Chamber to keep it within the o3DS frame budget.
+        CHECK_GAMEID("PRCHMB");
 
     // Emulating memory clocks introduces lag to Galactic Pinball's UFO table.
-    bool is_pinball = memcmp(tVBOpt.GAME_ID, "01VGPJ", 6) == 0;
+    bool is_pinball = CHECK_GAMEID("01VGPJ");
 
     bool is_waterworld_sample = is_waterworld && (start_PC == 0x0701b2b2);
 
@@ -759,6 +918,10 @@ static int drc_translateBlock(void) {
             MOV(r, arm_reg2); \
         }
 
+    #define LOAD_REG(arm,vb) \
+        if (!phys_regs[vb]) LDR_IO(arm, 11, offsetof(cpu_state, P_REG[vb])); \
+        else MOV(arm, phys_regs[vb]);
+
     #define SAVE_REG2(r) \
         if (arm_reg2 < 4) STR_IO(r, 11, offsetof(cpu_state, P_REG[inst_cache[i].reg2])); \
         else if(arm_reg2 != r) MOV(arm_reg2, r);
@@ -774,13 +937,26 @@ static int drc_translateBlock(void) {
         inst_ptr_start = inst_ptr;
         cycles += opcycle[inst_cache[i].opcode];
 
-    
+
         // Golf hack: this function clears the screen, so we should do the same
         if (unlikely((is_golf_us && inst_cache[i].PC == 0x0700ca64) ||
                     (is_golf_jp && inst_cache[i].PC == 0x0701602a))) {
             LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
             LDR_IO(2, 2, DRC_RELOC_GOLFHACK*4);
             BLX(ARM_COND_AL, 2);
+        }
+
+        // In Virtual League Baseball 2's overhead view, the draw order of the
+        // fielders is sorted very inefficiently: each fielder is a 32-byte
+        // object, and every swap in the sort swaps the entire set of 32 bytes.
+        // Replace with code that sorts the same array much more efficiently.
+        if (unlikely(is_baseball_2 && inst_cache[i].PC == 0x07007428)) {
+            LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
+            LDR_IO(2, 2, DRC_RELOC_BALLSORT*4);
+            BLX(ARM_COND_AL, 2);
+            // skip to after sorting code
+            inst_cache[i].branch_offset = 0x070074b8 - 0x07007428;
+            B(ARM_COND_AL, 0);
         }
 
         // Waterworld hack: slow down the sample at the start.
@@ -857,6 +1033,31 @@ static int drc_translateBlock(void) {
                 }
                 break;
             case V810_OP_JAL: // jal disp26
+            {
+                arm_inst *branch_to_tweak = NULL;
+                if (unlikely(is_baseball_2 && inst_cache[i].PC + inst_cache[i].branch_offset == 0x070077ca)) {
+                    // In the overhead view in Virtual League Baseball 2,
+                    // the fielders are scaled in software.
+                    // This algorithm is slow when recompiled, so we override it
+                    // with a faster native implementation.
+
+                    // Verify that our values make sense, otherwise revert to original
+                    LOAD_REG(0, 17);
+                    LOAD_REG(1, 18);
+                    MOV_IS(2, 0, ARM_SHIFT_LSR, 20);
+                    CMP_I(2, 0x70, 0);
+                    Boff(ARM_COND_NE, 9);
+                    MOV_IS(2, 1, ARM_SHIFT_LSR, 16);
+                    CMP_I(2, 0x5, 24);
+                    Boff(ARM_COND_NE, 6);
+                    // Do HLE
+                    LDR_IO(3, 11, offsetof(cpu_state, reloc_table));
+                    LDR_IO(3, 3, DRC_RELOC_BALLSCALE*4);
+                    LOAD_REG(2, 19);
+                    BLX(ARM_COND_AL, 3);
+                    branch_to_tweak = inst_ptr;
+                    Boff(ARM_COND_AL, 0);
+                }
                 if (is_space_invaders && inst_cache[i].PC == 0x07007fb6) {
                     // Make sure the Space Invaders intro FMV runs at the correct speed (ish).
                     // Value determined through trial and error.
@@ -875,7 +1076,10 @@ static int drc_translateBlock(void) {
                     STR_IO(1, 11, offsetof(cpu_state, P_REG[31]));
                 ADDCYCLES();
                 POP(1 << 15);
+                // fix the skip if needed
+                if (branch_to_tweak) branch_to_tweak->b_bl.imm = inst_ptr - branch_to_tweak - 2;
                 break;
+            }
             case V810_OP_RETI:
                 LDR_IO(0, 11, offsetof(cpu_state, S_REG[PSW]));
                 TST_I(0, PSW_NP >> 8, 24);
@@ -911,7 +1115,7 @@ static int drc_translateBlock(void) {
                 // vertical force doesn't have a tight spinloop like most games, so we can't detect it
                 // it just continuously loops through entities, doing nothing more when each one done
                 // so let's just artificially skip a bunch of time so that the game isn't slow
-                if ((memcmp(tVBOpt.GAME_ID, "01VH3E", 6) == 0 || memcmp(tVBOpt.GAME_ID, "18VH3J", 6) == 0)
+                if ((CHECK_GAMEID("01VH3E") || CHECK_GAMEID("18VH3J"))
                     && inst_cache[i].PC == 0x07000c08
                 ) {
                     MOV_I(0, 1, 25);
@@ -1176,14 +1380,14 @@ static int drc_translateBlock(void) {
                 // reg2/reg1 -> reg2 (r0)
                 // reg2%reg1 -> r30 (r1)
 
-                // save flags
+                // load function and save flags (interleaved)
                 MRS(0);
+                LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
                 PUSH(1 << 0);
+                LDR_IO(2, 2, DRC_RELOC_IDIVMOD*4);
 
                 RELOAD_REG2(0);
                 RELOAD_REG1(1);
-                LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
-                LDR_IO(2, 2, DRC_RELOC_IDIVMOD*4);
                 BLX(ARM_COND_AL, 2);
 
                 if (inst_cache[i].reg2 != 30) {
@@ -1206,14 +1410,14 @@ static int drc_translateBlock(void) {
                 // reg2/reg1 -> reg2 (r0)
                 // reg2%reg1 -> r30 (r1)
 
-                // save flags
+                // load function and save flags (interleaved)
                 MRS(0);
+                LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
                 PUSH(1 << 0);
+                LDR_IO(2, 2, DRC_RELOC_UIDIVMOD*4);
 
                 RELOAD_REG2(0);
                 RELOAD_REG1(1);
-                LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
-                LDR_IO(2, 2, DRC_RELOC_UIDIVMOD*4);
                 BLX(ARM_COND_AL, 2);
 
                 if (inst_cache[i].reg2 != 30) {
@@ -1413,6 +1617,8 @@ static int drc_translateBlock(void) {
                 break;
             case V810_OP_LD_B: // ld.b disp16 [reg1], reg2
             case V810_OP_IN_B: // in.b disp16 [reg1], reg2
+                if (arm_reg1 < 4) arm_reg1 = 0;
+
                 if (inst_cache[i].imm == 0) {
                     RELOAD_REG1(0);
                 } else if ((short)inst_cache[i].imm > 0) {
@@ -1440,7 +1646,10 @@ static int drc_translateBlock(void) {
                 }
 
                 LDR_IO(1, 11, offsetof(cpu_state, reloc_table));
+                AND_I(2, 0, 7, 8);
+                ADD_IS(1, 1, 2, ARM_SHIFT_LSR, 22);
                 LDR_IO(1, 1, DRC_RELOC_RBYTE*4);
+
                 BLX(ARM_COND_AL, 1);
 
                 // Add cycles returned in r1.
@@ -1466,6 +1675,8 @@ static int drc_translateBlock(void) {
                 break;
             case V810_OP_LD_H: // ld.h disp16 [reg1], reg2
             case V810_OP_IN_H: // in.h disp16 [reg1], reg2
+                if (arm_reg1 < 4) arm_reg1 = 0;
+
                 if (inst_cache[i].imm == 0) {
                     RELOAD_REG1(0);
                 } else if ((short)inst_cache[i].imm > 0) {
@@ -1493,7 +1704,10 @@ static int drc_translateBlock(void) {
                 }
 
                 LDR_IO(1, 11, offsetof(cpu_state, reloc_table));
+                AND_I(2, 0, 7, 8);
+                ADD_IS(1, 1, 2, ARM_SHIFT_LSR, 22);
                 LDR_IO(1, 1, DRC_RELOC_RHWORD*4);
+
                 BLX(ARM_COND_AL, 1);
 
                 // Add cycles returned in r1.
@@ -1519,6 +1733,8 @@ static int drc_translateBlock(void) {
                 break;
             case V810_OP_LD_W: // ld.w disp16 [reg1], reg2
             case V810_OP_IN_W: // in.w disp16 [reg1], reg2
+                if (arm_reg1 < 4) arm_reg1 = 0;
+
                 if (inst_cache[i].imm == 0) {
                     RELOAD_REG1(0);
                 } else if ((short)inst_cache[i].imm > 0) {
@@ -1546,7 +1762,10 @@ static int drc_translateBlock(void) {
                 }
 
                 LDR_IO(1, 11, offsetof(cpu_state, reloc_table));
+                AND_I(2, 0, 7, 8);
+                ADD_IS(1, 1, 2, ARM_SHIFT_LSR, 22);
                 LDR_IO(1, 1, DRC_RELOC_RWORD*4);
+
                 BLX(ARM_COND_AL, 1);
 
                 // Add cycles returned in r1.
@@ -1567,6 +1786,8 @@ static int drc_translateBlock(void) {
                 break;
             case V810_OP_ST_B:  // st.h reg2, disp16 [reg1]
             case V810_OP_OUT_B: // out.h reg2, disp16 [reg1]
+                if (arm_reg1 < 4) arm_reg1 = 0;
+
                 if (inst_cache[i].imm == 0) {
                     RELOAD_REG1(0);
                 } else if ((short)inst_cache[i].imm > 0) {
@@ -1598,9 +1819,12 @@ static int drc_translateBlock(void) {
                 else
                     RELOAD_REG2(1);
 
-                LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
-                LDR_IO(2, 2, DRC_RELOC_WBYTE*4);
-                BLX(ARM_COND_AL, 2);
+                LDR_IO(3, 11, offsetof(cpu_state, reloc_table));
+                AND_I(2, 0, 7, 8);
+                ADD_IS(3, 3, 2, ARM_SHIFT_LSR, 22);
+                LDR_IO(3, 3, DRC_RELOC_WBYTE*4);
+
+                BLX(ARM_COND_AL, 3);
 
                 if (slow_memory) cycles += 2;
 
@@ -1614,6 +1838,8 @@ static int drc_translateBlock(void) {
                 break;
             case V810_OP_ST_H:  // st.h reg2, disp16 [reg1]
             case V810_OP_OUT_H: // out.h reg2, disp16 [reg1]
+                if (arm_reg1 < 4) arm_reg1 = 0;
+
                 if (inst_cache[i].imm == 0) {
                     RELOAD_REG1(0);
                 } else if ((short)inst_cache[i].imm > 0) {
@@ -1645,9 +1871,12 @@ static int drc_translateBlock(void) {
                 else
                     RELOAD_REG2(1);
 
-                LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
-                LDR_IO(2, 2, DRC_RELOC_WHWORD*4);
-                BLX(ARM_COND_AL, 2);
+                LDR_IO(3, 11, offsetof(cpu_state, reloc_table));
+                AND_I(2, 0, 7, 8);
+                ADD_IS(3, 3, 2, ARM_SHIFT_LSR, 22);
+                LDR_IO(3, 3, DRC_RELOC_WHWORD*4);
+
+                BLX(ARM_COND_AL, 3);
 
                 if (slow_memory) cycles += 2;
 
@@ -1661,6 +1890,8 @@ static int drc_translateBlock(void) {
                 break;
             case V810_OP_ST_W:  // st.h reg2, disp16 [reg1]
             case V810_OP_OUT_W: // out.h reg2, disp16 [reg1]
+                if (arm_reg1 < 4) arm_reg1 = 0;
+
                 if (inst_cache[i].imm == 0) {
                     RELOAD_REG1(0);
                 } else if ((short)inst_cache[i].imm > 0) {
@@ -1692,9 +1923,12 @@ static int drc_translateBlock(void) {
                 else
                     RELOAD_REG2(1);
 
-                LDR_IO(2, 11, offsetof(cpu_state, reloc_table));
-                LDR_IO(2, 2, DRC_RELOC_WWORD*4);
-                BLX(ARM_COND_AL, 2);
+                LDR_IO(3, 11, offsetof(cpu_state, reloc_table));
+                AND_I(2, 0, 7, 8);
+                ADD_IS(3, 3, 2, ARM_SHIFT_LSR, 22);
+                LDR_IO(3, 3, DRC_RELOC_WWORD*4);
+
+                BLX(ARM_COND_AL, 3);
 
                 if (slow_memory) cycles += 4;
 
@@ -1976,9 +2210,9 @@ static int drc_translateBlock(void) {
                 case V810_OP_REV:
                     cycles += 22;
                     // RBIT would be great here, but that's only in ARMv6T2, so we'll do it manually.
-                    RELOAD_REG1(0);
                     LDR_IO(1, 11, offsetof(cpu_state, reloc_table));
                     LDR_IO(1, 1, DRC_RELOC_REV*4);
+                    RELOAD_REG1(0);
                     BLX(ARM_COND_AL, 1);
                     MOV(arm_reg2, 0);
                     reg2_modified = true;
@@ -2048,10 +2282,10 @@ static int drc_translateBlock(void) {
                 // if the timer is not zero at this point.
                 // Therefore, we need to handle the interrupt to update it,
                 // so that it doesn't accidentally run an extra time.
+                LDR_IO(2, 11, offsetof(cpu_state, irq_handler));
                 MRS(0);
                 LDW_I(1, inst_cache[i+1].PC);
                 ADD_I(10, 10, cycles & 0xFF, 0);
-                LDR_IO(2, 11, offsetof(cpu_state, irq_handler));
                 BLX(ARM_COND_AL, 2);
                 MSR(0);
                 cycles = 0;
@@ -2203,6 +2437,7 @@ void drc_init(void) {
 
 void drc_reset(void) {
     memset(rom_data_code_map, 0, sizeof(rom_data_code_map[0])*(BLOCK_MAP_COUNT >> 3));
+    memset(baseball2_sprites_is_unpacked, 0, sizeof(baseball2_sprites_is_unpacked));
     drc_clearCache();
 }
 

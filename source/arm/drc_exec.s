@@ -24,12 +24,8 @@ state_cycles_until_event_full:
 .struct 0
 block_phys_offset:
 .struct block_phys_offset + 4
-block_virt_loc:
-.struct block_virt_loc + 4
 block_size:
 .struct block_size + 4
-block_cycles:
-.struct block_cycles + 4
 block_reg_map:
 .struct block_reg_map + 4
 
@@ -112,8 +108,8 @@ drc_executeBlock:
 postexec:
     pop     {r0}
     stRegs
-    @ cycles += cuef - cuep
-    @ cuef = cuep = cuef - cuep - r10
+    @ cycles += cuef - (cuep - r10)
+    @ cuef = cuep = cuep - r10
     ldr     r0, [r11, #state_cycles]
     ldr     r2, [r11, #state_cycles_until_event_full]
     ldr     r3, [r11, #state_cycles_until_event_partial]
@@ -129,17 +125,16 @@ postexec:
 .globl drc_handleInterrupts
 .type drc_executeBlock, %function
 drc_handleInterrupts:
-    push    {r4, r5, lr}
+    push    {r4, lr}
 
     mov     r4, r0
-    mov     r5, r1
 
     @ Save flags and PC
     str     r4, [r11, #state_flags]
-    str     r5, [r11, #state_pc]
+    str     r1, [r11, #state_pc]
 
-    @ cycles += cuef - cuep - r10
-    @ cuef = cuep = cuef - cuep - r10
+    @ cycles += cuef - (cuep - r10)
+    @ cuef = cuep = cuep - r10
     @ r10 = 0
     ldr     r0, [r11, #state_cycles]
     ldr     r2, [r11, #state_cycles_until_event_full]
@@ -159,12 +154,12 @@ drc_handleInterrupts:
 ret_to_block:
     @ Return to the block
     mov     r0, r4
-    pop     {r4, r5, pc}
+    pop     {r4, pc}
 
 exit_block:
     @ Restore CPSR
     msr     cpsr_f, r4
 
     @ Exit the block ignoring linked return address
-    pop     {r4, r5}
+    pop     {r4}
     pop     {r0, pc}

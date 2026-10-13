@@ -3,6 +3,7 @@
 
 #include "vb_types.h"
 #include "arm_emit.h"
+#include "v810_mem.h"
 
 #if __ARM_ARCH >= 6 && __arm__
 #define DRC_AVAILABLE true
@@ -10,7 +11,6 @@
 #define DRC_AVAILABLE false
 #endif
 
-#define MAX_ROM_SIZE 0x1000000
 #define BLOCK_MAP_COUNT (MAX_ROM_SIZE / 2 / 2)
 #define CACHE_SIZE  0x200000
 #define MAX_V810_INST 8192
@@ -33,25 +33,25 @@ enum {
 };
 
 enum {
-    DRC_RELOC_IDIVMOD   = 0,
-    DRC_RELOC_UIDIVMOD  = 1,
-    DRC_RELOC_RBYTE     = 2,
-    DRC_RELOC_RHWORD    = 3,
-    DRC_RELOC_RWORD     = 4,
-    DRC_RELOC_WBYTE     = 5,
-    DRC_RELOC_WHWORD    = 6,
-    DRC_RELOC_WWORD     = 7,
-    DRC_RELOC_BSTR      = 8,
-    DRC_RELOC_REV       = 24,
-    DRC_RELOC_GOLFHACK  = 25,
+    DRC_RELOC_RBYTE     = 0,
+    DRC_RELOC_RHWORD    = 8,
+    DRC_RELOC_RWORD     = 16,
+    DRC_RELOC_WBYTE     = 24,
+    DRC_RELOC_WHWORD    = 32,
+    DRC_RELOC_WWORD     = 40,
+    DRC_RELOC_BSTR      = 48,
+    DRC_RELOC_IDIVMOD   = 64,
+    DRC_RELOC_UIDIVMOD  = 65,
+    DRC_RELOC_REV       = 66,
+    DRC_RELOC_GOLFHACK  = 67,
+    DRC_RELOC_BALLSCALE = 68,
+    DRC_RELOC_BALLSORT  = 69,
 };
 
 #define END_BLOCK 0xFF
 typedef struct {
     WORD *phys_offset;
-    WORD virt_loc;
     WORD size;
-    WORD cycles;
     // We can use ARM_NUM_CACHE_REGS registers at a time, r4-r10, and r11 will
     // have the address of v810_state
     // reg_map & 0x1F would have the VB register that is mapped to r4

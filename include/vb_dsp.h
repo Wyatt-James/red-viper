@@ -8,6 +8,7 @@
 extern "C" {
 #endif
 
+#include <assert.h>
 #include "vb_types.h"
 
 #ifdef __3DS__
@@ -55,6 +56,10 @@ typedef struct {
     u8 min, max;
 } SOFTBOUND;
 
+// Disable caches we don't need without removing them from the codebase
+// #define NEED_BG_CACHE
+// #define NEED_OBJ_DATA_CACHE
+
 // Struct to encapsulate all the Cache Stuff... I know its not necesary
 // But it helps me contain the ever spreading cache
 typedef struct {
@@ -64,34 +69,47 @@ typedef struct {
     BYTE    ObjPAL[4][4];           // Obj Pallet
     bool    BrtPALMod;              // Britness for Pallet Changed
 
+    #ifdef NEED_OBJ_DATA_CACHE
     bool    ObjDataCacheInvalid;    // Object Cache Is invalid
+    #endif
 
     bool    ObjCacheInvalid;        // Object Cache Is invalid
-    bool    BGCacheInvalid[14];     // Object Cache Is invalid
+    #ifdef NEED_BG_CACHE
+    HWORD   BGCacheInvalid;
+    #endif
 	bool	CharCacheInvalid;
     bool    CharCacheForceInvalid;
 	bool	CharacterCache[2048];	//Character chace
     DDSPSTATE DDSPDataState[2];     // Direct DisplayDraws True
     SOFTBOUND SoftBufWrote[2][64];
-    union {
-        BYTE u8[2][2][384*256];
-        HWORD u16[2][2][384*256/2];
-        WORD u32[2][2][384*256/4];
-    } OpaquePixels;
     bool    ColumnTableInvalid;     // Column Table is invalid
 } VB_DSPCACHE;
 
 ////////////////////////////////////////////////////////////////////
 // Keybd Fn's. Had to put it somewhere!
 // Read the Controller
+void input_init(void);
 HWORD V810_RControll(bool reset);
 
 typedef struct {
-    u16 head;
+    union {
+        u16 head;
+        struct {
+            u8 bg_map_base: 4;
+            u8: 2;
+            bool end: 1;
+            bool is_over: 1;
+            u8 scy: 2;
+            u8 scx: 2;
+            u8 bgm : 2;
+            u8 on : 2;
+        };
+    };
     s16 gx, gp, gy, mx, mp, my;
     u16 w, h, param, over;
     u16 _pad[5];
 } WORLD;
+static_assert(sizeof(WORLD) == 32);
 
 // DPSTTS / DPCTRL
 #define DPRST   0x0001
@@ -132,7 +150,8 @@ int videoProcessingTime(void);
 
 void video_init(void);
 void video_render(int displayed_fb, bool on_time);
-void video_flush(bool left_for_both);
+void video_download_vip(int drawn_fb);
+void video_flush(bool default_for_both);
 void video_quit(void);
 
 void V810_SetPal(int BRTA, int BRTB, int BRTC);
@@ -160,22 +179,24 @@ extern int eye_count;
 extern bool tileVisible[2048];
 extern int blankTile;
 
+void setup_brightness_lut(void);
+int video_get_colour(int id, int brt_reg);
+
 #ifdef __3DS__
 
 // video_hard
 extern C3D_Tex screenTexHard[2];
-extern C3D_RenderTarget *screenTargetHard[2];
-void video_hard_init(void);
-void video_hard_render(int drawn_fb);
-void update_texture_cache_hard(void);
 
 // video_soft
 extern C3D_Tex screenTexSoft[2];
+extern uint32_t columnTableSoft[2][96][3];
 void video_soft_init(void);
 void video_soft_to_texture(int displayed_fb);
+void video_soft_to_fb(u32 *outbuf, int displayed_fb, int src_eye, bool use_column_table, bool additive);
 
 #endif
 
+void video_hard_render(int drawn_fb);
 void video_soft_render(int drawn_fb);
 void update_texture_cache_soft(void);
 

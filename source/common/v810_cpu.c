@@ -232,7 +232,7 @@ int v810_load_step(void) {
         // load ram
         if (chunk_size > all_size - load_pos)
             chunk_size = all_size - load_pos;
-        size_t bytes_read = fread(vb_state->V810_GAME_RAM.pmemory + load_pos - rom_size, 1, chunk_size, load_sram);
+        size_t bytes_read = fread(vb_players[0].V810_GAME_RAM.pmemory + load_pos - rom_size, 1, chunk_size, load_sram);
         if (bytes_read == 0 && !feof(load_sram)) {
             fclose(load_sram);
             return -ENETDOWN;
@@ -245,13 +245,18 @@ int v810_load_step(void) {
     if (load_pos >= all_size) {
         // final setup
 
+        // fill the rest of the address space with copies of the rom
+        for (int i = V810_ROM1.size; i < MAX_ROM_SIZE; i += V810_ROM1.size) {
+            memcpy(V810_ROM1.pmemory + i, V810_ROM1.pmemory, V810_ROM1.size);
+        }
+
         // If we need to save, we'll find out later
         is_sram = false;
 
         // CRC32 Calculations
         gen_table();
         tVBOpt.CRC32 = get_crc(rom_size);
-        memcpy(tVBOpt.GAME_ID, (char*)(V810_ROM1.off + (V810_ROM1.highaddr & 0xFFFFFDF9)), 6);
+        tVBOpt.GAME_ID = MAKE_GAMEID((char*)(V810_ROM1.off + (V810_ROM1.highaddr & 0xFFFFFDF9)));
 
         // Apply game patches
         apply_patches();
@@ -334,7 +339,7 @@ void v810_reset(void) {
 
         vb_state->tHReg.hwRead = 0;
     }
-    
+
     emulated_player_id = 0;
     emulating_self = emulated_player_id == my_player_id;
     vb_state = &vb_players[emulated_player_id];
@@ -345,26 +350,35 @@ void v810_reset(void) {
     // Golf might set this to RM_CPUONLY, so reset it here.
     tVBOpt.RENDERMODE = RM_TOGPU;
 
-    // Software rendering for Test Chamber, only on New 3DS.
-    if (memcmp(tVBOpt.GAME_ID, "PRCHMB", 6) == 0) {
-        bool new_3ds = true;
-        #ifdef __3DS__
-        APT_CheckNew3DS(&new_3ds);
-        #endif
-        if (new_3ds) tVBOpt.RENDERMODE = RM_CPUONLY;
+    // VIP download for Test Chamber.
+    if (CHECK_GAMEID("PRCHMB")) {
+        tVBOpt.RENDERMODE = RM_TOCPU;
     }
 
+    // Don't soft flush for Golf, as that's mostly partial updates.
+    // I'd like to soft flush for Test Chamber, as that's all full updates.
+    // Unfortunately, there's still some instability, especially in anaglyph mode.
+    // tVBOpt.SOFT_FLUSH = CHECK_GAMEID("PRCHMB");
+
     tVBOpt.VIP_OVER_SOFT = (
-        memcmp(tVBOpt.GAME_ID, "01VREE", 6) == 0 // Red Alarm (U)
-        || memcmp(tVBOpt.GAME_ID, "E4VREJ", 6) == 0 // Red Alarm (J)
+        CHECK_GAMEID("01VREE") // Red Alarm (U)
+        || CHECK_GAMEID("E4VREJ") // Red Alarm (J)
+        || CHECK_GAMEID("01VZRE") // Zero Racers
     );
 
     // Double buffering is more accurate, but adds 1 frame of input lag.
     tVBOpt.DOUBLE_BUFFER =
-        memcmp(tVBOpt.GAME_ID, "PRCHMB", 6) == 0 || // Test Chamber
-        memcmp(tVBOpt.GAME_ID, "01VBHE", 6) == 0 || // Bound High
-        memcmp(tVBOpt.GAME_ID, "01VREE", 6) == 0 || // Red Alarm (U)
-        memcmp(tVBOpt.GAME_ID, "E4VREJ", 6) == 0; // Red Alarm (J)
+        CHECK_GAMEID("PRCHMB") || // Test Chamber
+        CHECK_GAMEID("01VBHE") || // Bound High
+        CHECK_GAMEID("EBVJBE") || // Jack Bros. (U)
+        CHECK_GAMEID("EBVJBJ") || // Jack Bros. (J)
+        CHECK_GAMEID("01VREE") || // Red Alarm (U)
+        CHECK_GAMEID("E4VREJ") || // Red Alarm (J)
+        CHECK_GAMEID("01VZRE"); // Zero Racers
+
+    #if DRC_AVAILABLE
+    drc_reset();
+    #endif
 }
 
 void predictEvent(bool increment) {
@@ -464,6 +478,9 @@ int serviceInt(unsigned int cycles, WORD PC) {
             vb_state->v810_state.ret = true;
             pending_int = true;
         }
+    } else if ((vb_state->tHReg.CCR & 0x14) == 0x14) {
+        // single player remote comm should never finish
+        vb_state->tHReg.nextcomm = cycles + 3200;
     }
 
     if (vb_state->tHReg.CCR & 0x04) {
@@ -523,8 +540,27 @@ static int serviceDisplayInt(unsigned int cycles, WORD PC) {
                     vb_state->tVIPREG.XPSTTS |= OVERTIME;
                     interrupts |= TIMEERR;
                 } else {
+                    int drawn_fb = !vb_state->tVIPREG.tDisplayedFB;
                     vb_state->tVIPREG.drawing = true;
-                    vb_state->tVIPREG.XPSTTS = XPEN | ((!vb_state->tVIPREG.tDisplayedFB+1)<<2) | SBOUT;
+                    vb_state->tVIPREG.XPSTTS = XPEN | ((drawn_fb+1)<<2) | SBOUT;
+                    vb_state->tVIPREG.rowcount = 0;
+
+                    if (tVBOpt.RENDERMODE != RM_CPUONLY && tVBOpt.RENDERMODE != RM_TOCPU) {
+                        if (tDSPCACHE.DDSPDataState[drawn_fb] != GPU_CLEAR) {
+                            memset((uint8_t*)vb_state->V810_DISPLAY_RAM.off + 0x8000 * drawn_fb, 0, 0x6000);
+                            memset((uint8_t*)vb_state->V810_DISPLAY_RAM.off + 0x10000 + 0x8000 * drawn_fb, 0, 0x6000);
+                            for (int i = 0; i < 64; i++) {
+                                tDSPCACHE.SoftBufWrote[drawn_fb][i].min = 0xff;
+                                tDSPCACHE.SoftBufWrote[drawn_fb][i].max = 0;
+                            }
+                            #ifdef __3DS__
+                            uint32_t fb_size;
+                            uint32_t *out_fb = (uint32_t*)C3D_Tex2DGetImagePtr(&screenTexSoft[drawn_fb], 0, &fb_size);
+                            memset(out_fb, 0, fb_size);
+                            #endif
+                            tDSPCACHE.DDSPDataState[drawn_fb] = GPU_CLEAR;
+                        }
+                    }
                 }
             }
         }
@@ -597,7 +633,6 @@ static int serviceDisplayInt(unsigned int cycles, WORD PC) {
 
     if (unlikely(disptime >= 400000)) {
         // frame end
-        vb_state->tVIPREG.rowcount = 0;
         vb_state->v810_state.ret = 1;
         vb_state->tVIPREG.lastdisp += 400000;
         vb_state->tVIPREG.newframe = true;
@@ -605,11 +640,15 @@ static int serviceDisplayInt(unsigned int cycles, WORD PC) {
 
         if (vb_state->tVIPREG.tFrame == 0 && !vb_state->tVIPREG.drawing && (vb_state->tVIPREG.XPCTRL & XPEN)) {
             vb_state->tVIPREG.tDisplayedFB = !vb_state->tVIPREG.tDisplayedFB;
-            if (!tVBOpt.VIP_OVERCLOCK) {
+            if (!tVBOpt.VIP_OVERCLOCK || is_multiplayer) {
                 vb_state->tVIPREG.frametime = videoProcessingTime();
             } else {
                 // pre-0.9.7 behaviour
                 vb_state->tVIPREG.frametime = 137216;
+            }
+            // if we're swapping fb's and we haven't downloaded, do so now
+            if (tVBOpt.RENDERMODE == RM_TOCPU) {
+                video_download_vip(vb_state->tVIPREG.tDisplayedFB);
             }
         }
 
@@ -739,4 +778,17 @@ int v810_run(void) {
     }
 
     return 0;
+}
+
+void v810_endmultiplayer() {
+    if (my_player_id == 1) {
+        VB_STATE tmp;
+        memcpy(&tmp, &vb_players[0], sizeof(tmp));
+        memcpy(&vb_players[0], &vb_players[1], sizeof(tmp));
+        memcpy(&vb_players[1], &tmp, sizeof(tmp));
+    }
+    my_player_id = 0;
+    emulated_player_id = 0;
+    emulating_self = true;
+    is_multiplayer = false;
 }
